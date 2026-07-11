@@ -1,0 +1,1577 @@
+// Modelica VSCode 拡張 — エントリポイント
+//
+// 実装済み:
+//   - シンタックスハイライト（TextMate 文法・宣言のみ）
+//   - ⑤ 新規ファイル作成（model/block/record/connector/function/type/package）
+//   - ④ コンパイル・計算実行（omc 連携: checkModel / simulate）
+
+// vscode モジュールはランタイム外（単体テスト等）では読み込めないためガードする。
+let vscode;
+try {
+  vscode = require("vscode");
+} catch (_) {
+  vscode = null;
+}
+const fs = require("fs");
+const path = require("path");
+const net = require("net");
+const util = require("./util");
+const omc = require("./omc");
+const annotations = require("./annotations");
+const symbols = require("./symbols");
+const graphics = require("./graphics");
+
+const { isValidIdent, qualifiedName, findLibraryRoot, classNameForFile } = util;
+
+// =====================================================================
+// ⑤ 新規ファイル作成
+// =====================================================================
+
+const KIND_LABEL = {
+  model: "空モデル",
+  block: "ブロック (SISO)",
+  record: "レコード",
+  connector: "コネクタ",
+  function: "関数",
+  type: "型",
+  package: "パッケージ",
+};
+
+function renderTemplate(kind, name, within) {
+  const w = `within ${within};`;
+  const doc = `  annotation (Documentation(info="<html>\n</html>"));`;
+  switch (kind) {
+    case "model":
+      return `${w}\nmodel ${name}\n\n${doc}\nend ${name};\n`;
+    case "block":
+      return `${w}\nblock ${name}\n  extends Modelica.Blocks.Interfaces.SISO;\n\n${doc}\nend ${name};\n`;
+    case "record":
+      return `${w}\nrecord ${name}\n\n${doc}\nend ${name};\n`;
+    case "connector":
+      return `${w}\nconnector ${name}\n\n${doc}\nend ${name};\n`;
+    case "function":
+      return `${w}\nfunction ${name}\n\n${doc}\nend ${name};\n`;
+    case "type":
+      return `${w}\ntype ${name} = Real annotation (Documentation(info="<html>\n</html>"));\n`;
+    case "package":
+      return `${w}\npackage ${name}\n  extends Modelica.Icons.Package;\n\n${doc}\nend ${name};\n`;
+    default:
+      throw new Error(`未知のエンティティ種別: ${kind}`);
+  }
+}
+
+/** dir/package.order に name を追記する（重複時は何もしない） */
+function addToPackageOrder(dir, name) {
+  const orderPath = path.join(dir, "package.order");
+  let lines = [];
+  if (fs.existsSync(orderPath)) {
+    lines = fs
+      .readFileSync(orderPath, "utf8")
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== "");
+  }
+  if (!lines.includes(name)) {
+    lines.push(name);
+  }
+  fs.writeFileSync(orderPath, lines.join("\n") + "\n", "utf8");
+}
+
+/**
+ * 親ディレクトリの package.order を更新する。ただし親が実際に Modelica パッケージ
+ * （package.mo を持つ）のときだけ。トップパッケージ作成時に非パッケージの上位ディレクトリへ
+ * package.order を作らないようにする。
+ */
+function updateParentOrder(dir, name) {
+  if (fs.existsSync(path.join(dir, "package.mo"))) {
+    addToPackageOrder(dir, name);
+  }
+}
+
+/** コマンド起動元から作成先ディレクトリを決定する */
+function resolveTargetDir(uri) {
+  if (uri && uri.fsPath) {
+    try {
+      return fs.statSync(uri.fsPath).isDirectory()
+        ? uri.fsPath
+        : path.dirname(uri.fsPath);
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  const ed = vscode.window.activeTextEditor;
+  if (ed && ed.document.uri.scheme === "file") {
+    return path.dirname(ed.document.uri.fsPath);
+  }
+  const folders = vscode.workspace.workspaceFolders;
+  if (folders && folders.length) return folders[0].uri.fsPath;
+  return undefined;
+}
+
+async function createEntity(kind, uri) {
+  const dir = resolveTargetDir(uri);
+  if (!dir) {
+    vscode.window.showErrorMessage(
+      "作成先フォルダを特定できません。エクスプローラーでフォルダを右クリックするか、.mo ファイルを開いてください。"
+    );
+    return;
+  }
+
+  const name = await vscode.window.showInputBox({
+    title: `Modelica: ${KIND_LABEL[kind]}を新規作成`,
+    prompt: `${KIND_LABEL[kind]}の名前`,
+    validateInput: (v) =>
+      isValidIdent(v)
+        ? undefined
+        : "Modelica 識別子（英字か _ で始まり、英数字か _ のみ）を入力してください。",
+  });
+  if (!name) return;
+
+  try {
+    let openPath;
+    if (kind === "package") {
+      const pkgDir = path.join(dir, name);
+      if (fs.existsSync(pkgDir)) {
+        vscode.window.showErrorMessage(`既に存在します: ${pkgDir}`);
+        return;
+      }
+      fs.mkdirSync(pkgDir);
+      const within = qualifiedName(dir);
+      fs.writeFileSync(
+        path.join(pkgDir, "package.mo"),
+        renderTemplate("package", name, within),
+        "utf8"
+      );
+      fs.writeFileSync(path.join(pkgDir, "package.order"), "", "utf8");
+      updateParentOrder(dir, name);
+      openPath = path.join(pkgDir, "package.mo");
+    } else {
+      const filePath = path.join(dir, `${name}.mo`);
+      if (fs.existsSync(filePath)) {
+        vscode.window.showErrorMessage(`既に存在します: ${filePath}`);
+        return;
+      }
+      const within = qualifiedName(dir);
+      fs.writeFileSync(filePath, renderTemplate(kind, name, within), "utf8");
+      updateParentOrder(dir, name);
+      openPath = filePath;
+    }
+
+    const doc = await vscode.workspace.openTextDocument(openPath);
+    await vscode.window.showTextDocument(doc);
+  } catch (err) {
+    vscode.window.showErrorMessage(`作成に失敗しました: ${err.message}`);
+  }
+}
+
+// =====================================================================
+// ④ コンパイル・計算実行（omc 連携）
+// =====================================================================
+
+let diagnostics; // vscode.DiagnosticCollection
+let output; // vscode.OutputChannel
+let extContext; // vscode.ExtensionContext（workspaceState 用）
+let docPanel; // Documentation 表示の Webview（使い回し）
+let diagramPanel; // Diagram View の Webview（使い回し）
+const annotationsHidden = new Set(); // annotation を折りたたみ中のドキュメント URI
+
+function getConfig() {
+  const c = vscode.workspace.getConfiguration("modelica");
+  return {
+    omcPath: c.get("omcPath", "omc"),
+    checkOnSave: c.get("checkOnSave", false),
+    stopTime: c.get("simulation.stopTime", 1.0),
+    intervals: c.get("simulation.numberOfIntervals", 500),
+  };
+}
+
+function toSeverity(s) {
+  switch (s) {
+    case "Error":
+      return vscode.DiagnosticSeverity.Error;
+    case "Warning":
+      return vscode.DiagnosticSeverity.Warning;
+    default:
+      return vscode.DiagnosticSeverity.Information;
+  }
+}
+
+/** パース済みエラー配列をファイル別に DiagnosticCollection へ反映する */
+function applyDiagnostics(parsed) {
+  diagnostics.clear();
+  const byFile = new Map();
+  for (const e of parsed) {
+    // omc は 1 始まり・終端は包含。VSCode は 0 始まり・終端は排他。
+    const range = new vscode.Range(
+      Math.max(0, e.startLine - 1),
+      Math.max(0, e.startCol - 1),
+      Math.max(0, e.endLine - 1),
+      Math.max(0, e.endCol)
+    );
+    const d = new vscode.Diagnostic(range, e.message, toSeverity(e.severity));
+    d.source = "omc";
+    const key = path.normalize(e.file);
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(d);
+  }
+  for (const [file, ds] of byFile) {
+    diagnostics.set(vscode.Uri.file(file), ds);
+  }
+}
+
+/**
+ * ワークスペース直下 .modelica-build にクラス名の完全ネストで実行用ディレクトリを用意する。
+ * 例: EAST.Orbital.Examples.Foo -> .modelica-build/EAST/Orbital/Examples/Foo
+ */
+function ensureBuildDir(referenceFsPath, className) {
+  const wsFolder = vscode.workspace.getWorkspaceFolder(
+    vscode.Uri.file(referenceFsPath)
+  );
+  const base = wsFolder ? wsFolder.uri.fsPath : path.dirname(referenceFsPath);
+  const root = path.join(base, ".modelica-build");
+  fs.mkdirSync(root, { recursive: true });
+  const gi = path.join(root, ".gitignore");
+  if (!fs.existsSync(gi)) fs.writeFileSync(gi, "*\n", "utf8");
+  const sub = className ? className.split(".").join(path.sep) : "";
+  const buildDir = sub ? path.join(root, sub) : root;
+  fs.mkdirSync(buildDir, { recursive: true });
+  return buildDir;
+}
+
+/** 対象ドキュメントから omc 実行の共通パラメータを組み立てる */
+function resolveTarget(doc) {
+  const filePath = doc.uri.fsPath;
+  const root = findLibraryRoot(path.dirname(filePath));
+  const loadTarget = root ? path.join(root, "package.mo") : filePath;
+  const className = classNameForFile(filePath);
+  return { filePath, loadTarget, className };
+}
+
+async function runCheck(doc) {
+  if (!doc || doc.languageId !== "modelica") {
+    vscode.window.showErrorMessage("チェックする Modelica ファイルを開いてください。");
+    return;
+  }
+  await doc.save();
+  const cfg = getConfig();
+  const { filePath, loadTarget, className } = resolveTarget(doc);
+  if (!className) {
+    vscode.window.showErrorMessage("チェック対象のクラス名を特定できません。");
+    return;
+  }
+  const script = omc.buildCheckScript({ loadTarget, className });
+  const buildDir = ensureBuildDir(filePath, className);
+
+  try {
+    const res = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Window,
+        title: `Modelica: ${className} をチェック中…`,
+      },
+      () => omc.runOmc(cfg.omcPath, script, buildDir)
+    );
+
+    const located = omc.parseErrors(res.stdout);
+    const unlocated = omc.parseUnlocated(res.stdout);
+    applyDiagnostics(located);
+
+    output.appendLine(`# checkModel(${className})`);
+    output.appendLine(res.stdout.trim());
+    output.appendLine("");
+
+    const nErr =
+      located.filter((e) => e.severity === "Error").length +
+      unlocated.filter((u) => u.severity === "Error").length;
+
+    if (nErr === 0) {
+      vscode.window.setStatusBarMessage(
+        `Modelica: ${className} チェック成功`,
+        5000
+      );
+      if (unlocated.length) {
+        vscode.window.showWarningMessage(
+          `omc: ${unlocated.map((u) => u.message).join(" / ")}`
+        );
+      }
+    } else {
+      vscode.commands.executeCommand("workbench.actions.view.problems");
+      const extra = unlocated.length
+        ? `（${unlocated.map((u) => u.message).join(" / ")}）`
+        : "";
+      vscode.window.showErrorMessage(
+        `Modelica: ${className} に ${nErr} 件のエラー${extra}`
+      );
+    }
+  } catch (e) {
+    vscode.window.showErrorMessage(e.message);
+  }
+}
+
+// omc がサポートする代表的なソルバ（Simulation Setup のプルダウン用・許可リスト兼用）
+const SOLVERS = [
+  "dassl",
+  "euler",
+  "heun",
+  "rungekutta",
+  "impeuler",
+  "trapezoid",
+  "imprungekutta",
+  "irksco",
+  "dopri45",
+  "rungekuttaSsc",
+  "radau5",
+  "radau3",
+  "radau1",
+  "lobatto2",
+  "lobatto4",
+  "lobatto6",
+  "gauss2",
+  "gauss4",
+  "gauss6",
+  "cvode",
+  "ida",
+];
+
+const OUTPUT_FORMATS = ["mat", "csv"];
+
+// Simulation Setup の Logging で選べる代表的な LOG_* ストリーム（許可リスト兼用）
+const LOG_FLAGS = [
+  "LOG_STDOUT",
+  "LOG_ASSERT",
+  "LOG_STATS",
+  "LOG_INIT",
+  "LOG_SOLVER",
+  "LOG_EVENTS",
+  "LOG_NLS",
+  "LOG_LS",
+  "LOG_JAC",
+  "LOG_DEBUG",
+  "LOG_SUCCESS",
+];
+
+// 既定 ON の Logging（ユーザ要望: STDOUT / ASSERT / STATS）
+const DEFAULT_LOGGING = ["LOG_STDOUT", "LOG_ASSERT", "LOG_STATS"];
+
+/**
+ * Webview から来た生入力を検証・正規化する。
+ * 数値は Number 化し、method/outputFormat は許可リストに丸める。
+ * .mos スクリプトへ埋め込むため、値の妥当性検証はインジェクション防止も兼ねる。
+ */
+function sanitizeOptions(raw) {
+  const r = raw || {};
+  const num = (v, def) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  };
+  let intervals = parseInt(r.numberOfIntervals, 10);
+  if (!Number.isFinite(intervals) || intervals < 1) intervals = 500;
+  let interval = num(r.interval, 0);
+  if (!(interval > 0)) interval = 0;
+  return {
+    startTime: num(r.startTime, 0),
+    stopTime: num(r.stopTime, 1),
+    intervalMode: r.intervalMode === "interval" ? "interval" : "numberOfIntervals",
+    numberOfIntervals: intervals,
+    interval,
+    tolerance: num(r.tolerance, 1e-6),
+    method: SOLVERS.includes(r.method) ? r.method : "dassl",
+    outputFormat: OUTPUT_FORMATS.includes(r.outputFormat) ? r.outputFormat : "mat",
+    deleteIntermediates:
+      r.deleteIntermediates === undefined ? true : !!r.deleteIntermediates,
+    logging: Array.isArray(r.logging)
+      ? r.logging.filter((f) => LOG_FLAGS.includes(f))
+      : DEFAULT_LOGGING.slice(),
+  };
+}
+
+/** intervalMode に応じて実際の numberOfIntervals を求める */
+function effectiveIntervals(o) {
+  if (o.intervalMode === "interval" && o.interval > 0) {
+    const span = o.stopTime - o.startTime;
+    return Math.max(1, Math.round(span / o.interval));
+  }
+  return o.numberOfIntervals;
+}
+
+/** ビルドディレクトリの中間生成物を削除し、結果(.mat/.csv)・ログ(.log)・
+ *  モデル情報(.mo/.mos)だけ残す */
+function cleanBuildDir(buildDir, resultFile) {
+  const keepExt = new Set([".mat", ".csv", ".log", ".mo", ".mos"]);
+  let entries;
+  try {
+    entries = fs.readdirSync(buildDir, { withFileTypes: true });
+  } catch (_) {
+    return;
+  }
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    const p = path.join(buildDir, e.name);
+    if (resultFile && path.normalize(p) === path.normalize(resultFile)) continue;
+    if (keepExt.has(path.extname(e.name).toLowerCase())) continue;
+    try {
+      fs.rmSync(p, { force: true });
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * saveTotalModel が出力した <simpleName>_total.mo が単体で有効かを、別のクリーンな omc
+ * セッションで load + checkModel して検証する。無効なら .invalid にリネームして出力パネルに注記。
+ * （`redeclare constant` を含む媒体等では saveTotalModel の出力が壊れて再ロードできないため）
+ * 非同期・非ブロッキングで呼ぶ。失敗しても致命的でない。
+ */
+async function validateTotalModel(buildDir, className, simpleName, omcPath) {
+  const totalPath = path.join(buildDir, `${simpleName}_total.mo`);
+  if (!fs.existsSync(totalPath)) return;
+  const script = [
+    "loadModel(Modelica); getErrorString();",
+    `loadFile("${omc.toOmcPath(totalPath)}"); getErrorString();`,
+    `checkModel(${className});`,
+    "getErrorString();",
+    "",
+  ].join("\n");
+  try {
+    const res = await omc.runOmc(omcPath, script, buildDir);
+    const nErr = omc
+      .parseErrors(res.stdout)
+      .filter((e) => e.severity === "Error").length;
+    const valid = /completed successfully/.test(res.stdout) && nErr === 0;
+    if (!valid) {
+      const invalidPath = totalPath + ".invalid";
+      try {
+        fs.rmSync(invalidPath, { force: true });
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        fs.renameSync(totalPath, invalidPath);
+      } catch (_) {
+        /* ignore */
+      }
+      output.appendLine(
+        `# saveTotalModel 検証: ${simpleName}_total.mo は単体で読み込めませんでした` +
+          `（redeclare constant を含む媒体等が原因で saveTotalModel の出力が壊れる）。` +
+          `${path.basename(totalPath)}.invalid にリネームしました。` +
+          `再現には .mos と元ソース(.mo)・結果(.mat)を利用してください。`
+      );
+      output.appendLine("");
+    }
+  } catch (_) {
+    /* 検証自体の失敗は無視 */
+  }
+}
+
+/** 指定オプションで実際に simulate を実行する */
+async function runSimulation(doc, rawOptions) {
+  if (!doc || doc.languageId !== "modelica") {
+    vscode.window.showErrorMessage(
+      "シミュレーションする Modelica ファイルを開いてください。"
+    );
+    return;
+  }
+  const options = sanitizeOptions(rawOptions);
+  await doc.save();
+  const cfg = getConfig();
+  const { filePath, loadTarget, className } = resolveTarget(doc);
+  if (!className) {
+    vscode.window.showErrorMessage("実行対象のクラス名を特定できません。");
+    return;
+  }
+  const numberOfIntervals = effectiveIntervals(options);
+  const buildDir = ensureBuildDir(filePath, className);
+  const simpleName = className.split(".").pop();
+
+  // モデル情報の保存（再現・アーカイブ用）:
+  //  - <単純名>.mos       … 実行スクリプト（keepScriptPath で保存）
+  //  - <単純名>_total.mo  … 依存込みの自己完結モデル（saveTotalModel、.mos 内で実行）
+  //  - <元ファイル名>.mo  … 元ソースのそのままコピー
+  const scriptPath = path.join(buildDir, `${simpleName}.mos`);
+  try {
+    fs.copyFileSync(filePath, path.join(buildDir, path.basename(filePath)));
+  } catch (_) {
+    /* ソースコピー失敗は致命的でない */
+  }
+
+  // 今回の実行で結果が生成されたかで成否を判定するため、古い結果ファイルを先に消す。
+  const resultExt = options.outputFormat === "csv" ? "csv" : "mat";
+  const expectedResult = path.join(buildDir, `${simpleName}.${resultExt}`);
+  try {
+    fs.rmSync(expectedResult, { force: true });
+  } catch (_) {
+    /* ignore */
+  }
+
+  // シミュレーション状態を受け取る TCP サーバ（omc の実行ファイルが -port で接続し進捗を送る）
+  let reporter = null;
+  let lastPct = 0;
+  const server = net.createServer((sock) => {
+    let buf = "";
+    sock.on("data", (d) => {
+      buf += d.toString();
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        const m = /^(\d+)\s/.exec(line); // "<0..10000> <status>"
+        if (m && reporter) {
+          const pct = Math.min(100, Math.round(parseInt(m[1], 10) / 100));
+          if (pct > lastPct) {
+            reporter.report({ increment: pct - lastPct, message: `${pct}%` });
+            lastPct = pct;
+          }
+        }
+      }
+    });
+    sock.on("error", () => {});
+  });
+  let statusPort = 0;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    statusPort = server.address().port;
+  } catch (_) {
+    statusPort = 0; // ポートが確保できなければ進捗なしで続行
+  }
+
+  const simOptions = { ...options, numberOfIntervals, statusPort };
+  const script = omc.buildSimulateScript({
+    loadTarget,
+    className,
+    options: simOptions,
+  });
+
+  try {
+    const res = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Modelica: ${className} をシミュレーション中…`,
+        cancellable: false,
+      },
+      (progress) => {
+        reporter = progress;
+        return omc.runOmc(cfg.omcPath, script, buildDir, scriptPath);
+      }
+    );
+
+    const located = omc.parseErrors(res.stdout);
+    applyDiagnostics(located);
+    const reported = omc.parseResultFile(res.stdout);
+    // -r で相対名を指定しているため、omc は相対パスで報告する。buildDir 基準に解決する。
+    const resultFile =
+      reported && !path.isAbsolute(reported)
+        ? path.join(buildDir, reported)
+        : reported;
+
+    output.appendLine(
+      `# simulate(${className}, startTime=${options.startTime}, stopTime=${options.stopTime}, numberOfIntervals=${numberOfIntervals}, method="${options.method}", tolerance=${options.tolerance}, outputFormat="${options.outputFormat}", lv="${options.logging.join(",")}")`
+    );
+    output.appendLine(res.stdout.trim());
+    output.appendLine("");
+
+    const nErr = located.filter((e) => e.severity === "Error").length;
+    // 成否は「今回の実行で結果ファイルが生成されたか」で判定する。
+    // omc は非致命的なエラー（例: 一部媒体の redeclare constant）を出しても
+    // シミュレーション自体は成功して結果を書くことがあるため、エラー件数では判定しない。
+    const produced = fs.existsSync(expectedResult);
+    const ok = produced;
+    const resultFileFinal =
+      resultFile && fs.existsSync(resultFile) ? resultFile : expectedResult;
+
+    if (options.deleteIntermediates) {
+      cleanBuildDir(buildDir, resultFileFinal);
+    }
+
+    // _total.mo が単体で有効か検証し、無効なら .invalid にリネーム＋注記（非ブロッキング）
+    void validateTotalModel(buildDir, className, simpleName, cfg.omcPath);
+
+    if (ok) {
+      const openFolder = "フォルダを開く";
+      const suffix = nErr > 0 ? "（omc 診断あり・Problems 参照）" : "";
+      const choice = await vscode.window.showInformationMessage(
+        `Modelica: ${className} シミュレーション成功 → ${path.basename(
+          resultFileFinal
+        )}${suffix}`,
+        openFolder
+      );
+      if (choice === openFolder) {
+        vscode.commands.executeCommand(
+          "revealFileInOS",
+          vscode.Uri.file(resultFileFinal)
+        );
+      }
+    } else {
+      if (nErr > 0) {
+        vscode.commands.executeCommand("workbench.actions.view.problems");
+      }
+      output.show(true);
+      vscode.window.showErrorMessage(
+        `Modelica: ${className} のシミュレーションに失敗しました（詳細は出力パネル「Modelica」）。`
+      );
+    }
+  } catch (e) {
+    vscode.window.showErrorMessage(e.message);
+  } finally {
+    try {
+      server.close();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+function getNonce() {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let text = "";
+  for (let i = 0; i < 32; i++) {
+    text += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return text;
+}
+
+function htmlAttr(v) {
+  return String(v).replace(/"/g, "&quot;");
+}
+
+/** OMEdit の Simulation Setup 風の Webview HTML を生成する */
+function getSimSetupHtml(webview, className, initial) {
+  const nonce = getNonce();
+  const solverOptions = SOLVERS.map(
+    (s) =>
+      `<option value="${s}"${s === initial.method ? " selected" : ""}>${s}</option>`
+  ).join("");
+  const formatOptions = OUTPUT_FORMATS.map(
+    (f) =>
+      `<option value="${f}"${
+        f === initial.outputFormat ? " selected" : ""
+      }>${f}</option>`
+  ).join("");
+  const logChecks = LOG_FLAGS.map(
+    (f) =>
+      `<label class="chk"><input type="checkbox" class="log-chk" value="${f}"${
+        initial.logging.includes(f) ? " checked" : ""
+      } /> ${f}</label>`
+  ).join("");
+  const numChecked = initial.intervalMode !== "interval" ? " checked" : "";
+  const ivChecked = initial.intervalMode === "interval" ? " checked" : "";
+
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; font-size: var(--vscode-font-size); }
+  h2 { font-size: 1.1em; margin: 0 0 4px; }
+  .cls { color: var(--vscode-descriptionForeground); margin-bottom: 16px; font-family: var(--vscode-editor-font-family); }
+  fieldset { border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, #8884)); border-radius: 4px; margin: 0 0 14px; padding: 10px 14px; }
+  legend { padding: 0 6px; color: var(--vscode-descriptionForeground); }
+  .row { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  label.field { text-align: right; }
+  input[type=number], select { width: 100%; box-sizing: border-box; padding: 4px 6px;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
+  .radioline { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .radioline > label:first-child { text-align: right; }
+  .logs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; }
+  .chk { display: flex; align-items: center; gap: 6px; }
+  .chk input, .radioline input[type=radio] { width: auto; }
+  .buttons { margin-top: 6px; display: flex; gap: 8px; justify-content: flex-end; }
+  button { padding: 6px 14px; border: none; border-radius: 2px; cursor: pointer;
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+</style>
+</head>
+<body>
+  <h2>Simulation Setup</h2>
+  <div class="cls">${className}</div>
+
+  <fieldset>
+    <legend>Simulation Interval</legend>
+    <div class="row"><label class="field" for="startTime">Start Time [s]</label><input id="startTime" type="number" step="any" value="${htmlAttr(initial.startTime)}" /></div>
+    <div class="row"><label class="field" for="stopTime">Stop Time [s]</label><input id="stopTime" type="number" step="any" value="${htmlAttr(initial.stopTime)}" /></div>
+    <div class="radioline">
+      <label><input type="radio" name="intervalMode" value="numberOfIntervals"${numChecked} /> Number of Intervals</label>
+      <input id="numberOfIntervals" type="number" step="1" min="1" value="${htmlAttr(initial.numberOfIntervals)}" />
+    </div>
+    <div class="radioline">
+      <label><input type="radio" name="intervalMode" value="interval"${ivChecked} /> Interval [s]</label>
+      <input id="interval" type="number" step="any" min="0" value="${htmlAttr(initial.interval)}" />
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Integration</legend>
+    <div class="row"><label class="field" for="method">Method</label><select id="method">${solverOptions}</select></div>
+    <div class="row"><label class="field" for="tolerance">Tolerance</label><input id="tolerance" type="number" step="any" value="${htmlAttr(initial.tolerance)}" /></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Output</legend>
+    <div class="row"><label class="field" for="outputFormat">Format</label><select id="outputFormat">${formatOptions}</select></div>
+    <div class="chk" style="margin-top:6px"><input type="checkbox" id="deleteIntermediates"${
+      initial.deleteIntermediates ? " checked" : ""
+    } /> <label for="deleteIntermediates">中間コンパイルファイル (.c/.o/.h 等) を削除して結果だけ残す</label></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Logging (-lv)</legend>
+    <div class="logs">${logChecks}</div>
+  </fieldset>
+
+  <div class="buttons">
+    <button class="secondary" id="cancel">Cancel</button>
+    <button class="secondary" id="saveToModel">モデルに保存</button>
+    <button id="simulate">Simulate</button>
+  </div>
+
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  function collect() {
+    return {
+      startTime: document.getElementById('startTime').value,
+      stopTime: document.getElementById('stopTime').value,
+      intervalMode: (document.querySelector('input[name=intervalMode]:checked') || {}).value || 'numberOfIntervals',
+      numberOfIntervals: document.getElementById('numberOfIntervals').value,
+      interval: document.getElementById('interval').value,
+      tolerance: document.getElementById('tolerance').value,
+      method: document.getElementById('method').value,
+      outputFormat: document.getElementById('outputFormat').value,
+      deleteIntermediates: document.getElementById('deleteIntermediates').checked,
+      logging: Array.from(document.querySelectorAll('.log-chk:checked')).map((e) => e.value),
+    };
+  }
+  document.getElementById('simulate').addEventListener('click', () => {
+    vscode.postMessage({ command: 'simulate', values: collect() });
+  });
+  document.getElementById('saveToModel').addEventListener('click', () => {
+    vscode.postMessage({ command: 'saveToModel', values: collect() });
+  });
+  document.getElementById('cancel').addEventListener('click', () => {
+    vscode.postMessage({ command: 'cancel' });
+  });
+</script>
+</body>
+</html>`;
+}
+
+/** Simulation Setup の設定をモデルの experiment / simulationFlags annotation に書き戻す */
+async function saveSimSetupToModel(doc, className, rawOptions) {
+  const o = sanitizeOptions(rawOptions);
+  const span = o.stopTime - o.startTime;
+  const interval =
+    o.intervalMode === "interval" && o.interval > 0
+      ? o.interval
+      : o.numberOfIntervals > 0
+      ? span / o.numberOfIntervals
+      : span;
+  const expStr = `experiment(StartTime=${o.startTime}, StopTime=${o.stopTime}, Interval=${interval}, Tolerance=${o.tolerance})`;
+  const flagsStr = `__OpenModelica_simulationFlags(s="${o.method}", lv="${o.logging.join(
+    ","
+  )}")`;
+  const oldText = doc.getText();
+  const newText = annotations.upsertSimulationAnnotation(
+    oldText,
+    className,
+    expStr,
+    flagsStr
+  );
+  if (newText === oldText) {
+    vscode.window.setStatusBarMessage(`Modelica: ${className} 変更なし`, 3000);
+    return;
+  }
+  const edit = new vscode.WorkspaceEdit();
+  const full = new vscode.Range(
+    doc.positionAt(0),
+    doc.positionAt(oldText.length)
+  );
+  edit.replace(doc.uri, full, newText);
+  const applied = await vscode.workspace.applyEdit(edit);
+  if (applied) {
+    await doc.save();
+    vscode.window.setStatusBarMessage(
+      `Modelica: ${className} に experiment 設定を保存しました`,
+      4000
+    );
+  } else {
+    vscode.window.showErrorMessage(`Modelica: ${className} への保存に失敗しました。`);
+  }
+}
+
+/** Simulation Setup ダイアログ（Webview）を開き、実行・保存を仲介する */
+async function openSimulationSetup(doc) {
+  if (!doc || doc.languageId !== "modelica") {
+    vscode.window.showErrorMessage(
+      "シミュレーションする Modelica ファイルを開いてください。"
+    );
+    return;
+  }
+  const { className } = resolveTarget(doc);
+  if (!className) {
+    vscode.window.showErrorMessage("実行対象のクラス名を特定できません。");
+    return;
+  }
+  const cfg = getConfig();
+  const stateKey = `modelica.simopts.${className}`;
+  const saved = extContext.workspaceState.get(stateKey, {});
+  const text = doc.getText();
+  const expA = annotations.parseExperiment(text) || {};
+  const flagsA = annotations.parseSimulationFlags(text) || {};
+  // 優先順位: モデルの annotation > 前回設定(workspaceState) > 既定
+  const pick = (...vals) => {
+    for (const v of vals) if (v !== undefined && v !== null) return v;
+  };
+
+  let intervalMode;
+  let interval;
+  let numberOfIntervals;
+  if (expA.interval !== undefined) {
+    intervalMode = "interval";
+    interval = expA.interval;
+    numberOfIntervals = pick(saved.numberOfIntervals, cfg.intervals);
+  } else {
+    intervalMode = pick(saved.intervalMode, "numberOfIntervals");
+    interval = pick(saved.interval, 0.1);
+    numberOfIntervals = pick(saved.numberOfIntervals, cfg.intervals);
+  }
+  const annLogging = (flagsA.logging || []).filter((f) => LOG_FLAGS.includes(f));
+
+  const initial = {
+    startTime: pick(expA.startTime, saved.startTime, 0),
+    stopTime: pick(expA.stopTime, saved.stopTime, cfg.stopTime),
+    intervalMode,
+    interval,
+    numberOfIntervals,
+    tolerance: pick(expA.tolerance, saved.tolerance, 1e-6),
+    method: pick(flagsA.method, saved.method, "dassl"),
+    outputFormat: pick(saved.outputFormat, "mat"),
+    deleteIntermediates: pick(saved.deleteIntermediates, true),
+    logging: annLogging.length
+      ? annLogging
+      : pick(saved.logging, DEFAULT_LOGGING),
+  };
+
+  const panel = vscode.window.createWebviewPanel(
+    "modelicaSimSetup",
+    `Simulation Setup: ${className}`,
+    { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  panel.webview.html = getSimSetupHtml(panel.webview, className, initial);
+  panel.webview.onDidReceiveMessage(
+    async (msg) => {
+      if (!msg) return;
+      if (msg.command === "simulate") {
+        const opts = sanitizeOptions(msg.values);
+        await extContext.workspaceState.update(stateKey, opts);
+        panel.dispose();
+        runSimulation(doc, opts);
+      } else if (msg.command === "saveToModel") {
+        const opts = sanitizeOptions(msg.values);
+        await extContext.workspaceState.update(stateKey, opts);
+        await saveSimSetupToModel(doc, className, opts);
+      } else if (msg.command === "cancel") {
+        panel.dispose();
+      }
+    },
+    undefined,
+    extContext.subscriptions
+  );
+}
+
+// =====================================================================
+// ① 継承もと・変数宣言へのジャンプ（go-to-definition）
+// =====================================================================
+
+let rootMapCache = null;
+
+/** ワークスペースのライブラリルート {ルートパッケージ名: ディレクトリ} を構築（キャッシュ）。 */
+async function getRootMap() {
+  if (rootMapCache) return rootMapCache;
+  const map = {};
+  try {
+    const uris = await vscode.workspace.findFiles(
+      "**/package.mo",
+      "**/node_modules/**",
+      5000
+    );
+    const files = uris.map((u) => u.fsPath);
+    const dirSet = new Set(files.map((f) => path.dirname(f)));
+    for (const f of files) {
+      const d = path.dirname(f);
+      if (dirSet.has(path.dirname(d))) continue; // 親も package → ルートでない
+      try {
+        const name = symbols.readPrimaryClassName(fs.readFileSync(f, "utf8"));
+        if (name && !(name in map)) map[name] = d;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  rootMapCache = map;
+  return map;
+}
+
+const definitionProvider = {
+  async provideDefinition(document, position) {
+    const text = document.getText();
+    const offset = document.offsetAt(position);
+    const dn = symbols.dottedNameAt(text, offset);
+    if (!dn || !dn.name) return null;
+    const toLoc = (uri, line, character) =>
+      new vscode.Location(uri, new vscode.Position(line, character));
+
+    const isDotted = dn.name.includes(".");
+
+    // 1) 単純名: まず現在ファイルのローカル宣言（変数/コンポーネント）
+    if (!isDotted) {
+      const loc = symbols.findLocalDeclaration(text, dn.name);
+      if (loc) return toLoc(document.uri, loc.line, loc.character);
+    }
+
+    const rootMap = await getRootMap();
+
+    // 2) クラス（修飾名）解決 = 継承もと(extends)や型参照へのジャンプ
+    let cls = symbols.resolveClass(dn.name, rootMap);
+
+    // 3) 単純名でクラス未解決 → 同一パッケージのクラスとして解決
+    if (!cls && !isDotted) {
+      const q = util.qualifiedName(path.dirname(document.uri.fsPath));
+      if (q) cls = symbols.resolveClass(q + "." + dn.name, rootMap);
+    }
+    if (cls)
+      return toLoc(vscode.Uri.file(cls.file), cls.line, cls.character);
+
+    // 4) ドット名でクラス未解決（例: component.field）→ 先頭セグメントのローカル宣言
+    if (isDotted) {
+      const first = dn.name.split(".")[0];
+      const loc = symbols.findLocalDeclaration(text, first);
+      if (loc) return toLoc(document.uri, loc.line, loc.character);
+    }
+    return null;
+  },
+};
+
+// =====================================================================
+// ② 入力予測（補完）
+// =====================================================================
+
+const MODELICA_KEYWORDS = [
+  "model", "class", "record", "block", "connector", "package", "type",
+  "function", "operator", "extends", "import", "within", "parameter",
+  "constant", "discrete", "flow", "stream", "input", "output", "inner",
+  "outer", "replaceable", "redeclare", "final", "partial", "encapsulated",
+  "each", "public", "protected", "equation", "algorithm", "initial",
+  "annotation", "end", "if", "then", "else", "elseif", "elsewhen", "when",
+  "for", "in", "loop", "while", "break", "return", "connect", "and", "or",
+  "not", "true", "false", "der", "pre", "time", "enumeration",
+];
+
+const BUILTIN_TYPES = ["Real", "Integer", "Boolean", "String"];
+
+/** name→CompletionItem（クラス/パッケージ）。 */
+function classItem(name, kind) {
+  const K = vscode.CompletionItemKind;
+  return new vscode.CompletionItem(
+    name,
+    kind === "package" ? K.Module : K.Class
+  );
+}
+
+const completionProvider = {
+  async provideCompletionItems(document, position) {
+    const linePrefix = document
+      .lineAt(position.line)
+      .text.slice(0, position.character);
+    const m = /([A-Za-z_][\w.]*)$/.exec(linePrefix);
+    const token = m ? m[1] : "";
+    const rootMap = await getRootMap();
+    const items = [];
+
+    if (token.includes(".")) {
+      const qualifier = token.slice(0, token.lastIndexOf("."));
+
+      // 1) パッケージ/クラスの子（Modelica.Blocks. → Interfaces, Sources, …）
+      const children = symbols.listPackageChildren(qualifier, rootMap);
+      if (children.length) {
+        for (const c of children) items.push(classItem(c.name, c.kind));
+        return items;
+      }
+
+      // 2) コンポーネントのメンバー（sun. → bodyName, mu, …）
+      if (!qualifier.includes(".")) {
+        const comp = symbols
+          .parseComponents(document.getText())
+          .find((c) => c.name === qualifier);
+        if (comp) {
+          const dirQ = util.qualifiedName(path.dirname(document.uri.fsPath));
+          let cls = symbols.resolveClass(comp.type, rootMap);
+          if (!cls && dirQ)
+            cls = symbols.resolveClass(dirQ + "." + comp.type, rootMap);
+          if (cls && cls.file) {
+            const clsName = comp.type.split(".").pop();
+            for (const mem of symbols.listClassMembers(
+              cls.file,
+              clsName,
+              rootMap,
+              4
+            )) {
+              const it = new vscode.CompletionItem(
+                mem.name,
+                vscode.CompletionItemKind.Field
+              );
+              it.detail = mem.type;
+              items.push(it);
+            }
+          }
+        }
+      }
+      return items;
+    }
+
+    // 素の単語: キーワード + 組込み型 + ローカル宣言 + ルート + 同一パッケージの兄弟
+    for (const k of MODELICA_KEYWORDS)
+      items.push(new vscode.CompletionItem(k, vscode.CompletionItemKind.Keyword));
+    for (const t of BUILTIN_TYPES)
+      items.push(new vscode.CompletionItem(t, vscode.CompletionItemKind.Class));
+    for (const c of symbols.parseComponents(document.getText())) {
+      const it = new vscode.CompletionItem(
+        c.name,
+        vscode.CompletionItemKind.Field
+      );
+      it.detail = c.type;
+      items.push(it);
+    }
+    for (const rootName of Object.keys(rootMap))
+      items.push(
+        new vscode.CompletionItem(rootName, vscode.CompletionItemKind.Module)
+      );
+    const q = util.qualifiedName(path.dirname(document.uri.fsPath));
+    if (q)
+      for (const c of symbols.listPackageChildren(q, rootMap))
+        items.push(classItem(c.name, c.kind));
+
+    return items;
+  },
+};
+
+// =====================================================================
+// ③ 変数・オブジェクト名の一括変換（リネーム）
+// =====================================================================
+
+const WORD_RE = /[A-Za-z_]\w*/;
+
+/** 位置のワード範囲・名前・直前が '.'（メンバー参照）か を返す。 */
+function wordContext(document, position) {
+  const range = document.getWordRangeAtPosition(position, WORD_RE);
+  if (!range) return null;
+  const name = document.getText(range);
+  const offset = document.offsetAt(range.start);
+  const text = document.getText();
+  let p = offset - 1;
+  while (p >= 0 && /\s/.test(text[p])) p--;
+  const isMember = p >= 0 && text[p] === ".";
+  return { range, name, isMember, text };
+}
+
+/** name が現在ファイルのローカル宣言（変数/コンポーネント）か。 */
+function isLocalComponent(text, name) {
+  return symbols.parseComponents(text).some((c) => c.name === name);
+}
+
+const renameProvider = {
+  prepareRename(document, position) {
+    const wc = wordContext(document, position);
+    if (!wc) throw new Error("リネームできる識別子がありません。");
+    if (wc.isMember)
+      throw new Error(
+        "他オブジェクトのメンバーはリネームできません（そのクラス側で実行してください）。"
+      );
+    if (!isLocalComponent(wc.text, wc.name))
+      throw new Error(
+        "リネーム対象は変数・コンポーネント名のみ対応です（クラス名・型・キーワードは未対応）。"
+      );
+    return wc.range;
+  },
+
+  provideRenameEdits(document, position, newName) {
+    const wc = wordContext(document, position);
+    if (!wc) throw new Error("リネームできる識別子がありません。");
+    if (wc.isMember)
+      throw new Error("他オブジェクトのメンバーはリネームできません。");
+    if (!util.isValidIdent(newName))
+      throw new Error(
+        "無効な Modelica 識別子です（英字か _ で始まり、英数字か _ のみ）。"
+      );
+    if (!isLocalComponent(wc.text, wc.name))
+      throw new Error("リネーム対象は変数・コンポーネント名のみ対応です。");
+    if (newName === wc.name) return new vscode.WorkspaceEdit();
+    if (isLocalComponent(wc.text, newName))
+      throw new Error(`"${newName}" は既にこのクラスで使われています。`);
+
+    const text = wc.text;
+    const span = symbols.primaryClassSpan(text);
+    const lo = span ? span.start : 0;
+    const hi = span ? span.end : text.length;
+    const edit = new vscode.WorkspaceEdit();
+    for (const o of symbols.findIdentifierOccurrences(text, wc.name)) {
+      if (o.start < lo || o.end > hi) continue;
+      edit.replace(
+        document.uri,
+        new vscode.Range(
+          document.positionAt(o.start),
+          document.positionAt(o.end)
+        ),
+        newName
+      );
+    }
+    return edit;
+  },
+};
+
+// =====================================================================
+// Documentation 表示（Webview）
+// =====================================================================
+
+/** Documentation の HTML をテーマ対応の Webview 文書に包む。 */
+function getDocHtml(webview, className, docHtml) {
+  const nonce = getNonce();
+  const inner = docHtml
+    .replace(/^\s*<html>/i, "")
+    .replace(/<\/html>\s*$/i, "");
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} data:;" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+    padding: 12px 20px; line-height: 1.6; max-width: 900px; }
+  h1 { font-size: 1.3em; border-bottom: 1px solid var(--vscode-panel-border, #8884); padding-bottom: 4px; }
+  h4, h3, h2 { margin-top: 1.4em; }
+  code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textCodeBlock-background, #8882);
+    padding: 1px 4px; border-radius: 3px; }
+  pre { background: var(--vscode-textCodeBlock-background, #8882); padding: 10px; border-radius: 4px; overflow-x: auto; }
+  a { color: var(--vscode-textLink-foreground); }
+  table { border-collapse: collapse; } td, th { border: 1px solid var(--vscode-panel-border, #8884); padding: 4px 8px; }
+  img { max-width: 100%; }
+  .cls { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); margin-bottom: 12px; }
+</style>
+</head>
+<body>
+  <div class="cls">${className}</div>
+  ${inner}
+</body>
+</html>`;
+}
+
+async function showDocumentation(doc) {
+  if (!doc || doc.languageId !== "modelica") {
+    vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
+    return;
+  }
+  const { className } = resolveTarget(doc);
+  const html = annotations.extractDocumentation(doc.getText());
+  if (!html) {
+    vscode.window.showInformationMessage(
+      `Modelica: ${className || "このモデル"} に Documentation はありません。`
+    );
+    return;
+  }
+  if (!docPanel) {
+    docPanel = vscode.window.createWebviewPanel(
+      "modelicaDoc",
+      "Modelica Documentation",
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: false }
+    );
+    docPanel.onDidDispose(() => {
+      docPanel = undefined;
+    });
+  }
+  docPanel.title = `Doc: ${className || ""}`.trim();
+  docPanel.webview.html = getDocHtml(docPanel.webview, className || "", html);
+  docPanel.reveal(vscode.ViewColumn.Beside, true);
+}
+
+// =====================================================================
+// Diagram View（Webview・SVG）
+// =====================================================================
+
+function getDiagramHtml(webview, className, svg) {
+  const nonce = getNonce();
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}';" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+    display: flex; flex-direction: column;
+    background:
+      linear-gradient(var(--vscode-panel-border, #8882) 1px, transparent 1px) 0 0 / 20px 20px,
+      linear-gradient(90deg, var(--vscode-panel-border, #8882) 1px, transparent 1px) 0 0 / 20px 20px,
+      var(--vscode-editor-background); }
+  .cls { padding: 6px 12px; color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family); border-bottom: 1px solid var(--vscode-panel-border, #8884);
+    background: var(--vscode-editor-background); }
+  .canvas { flex: 1; overflow: hidden; position: relative; cursor: grab; }
+  .canvas.panning { cursor: grabbing; }
+  .canvas > svg { position: absolute; top: 0; left: 0; width: 100%; height: auto;
+    max-width: none; max-height: none; transform-origin: 0 0; }
+  .hint { position: absolute; right: 8px; bottom: 6px; font-size: 11px;
+    color: var(--vscode-descriptionForeground); opacity: 0.75; pointer-events: none; }
+</style>
+</head>
+<body>
+  <div class="cls">${className} — Diagram</div>
+  <div class="canvas" id="canvas">${svg}<div class="hint">ドラッグ: パン ／ ホイール: ズーム ／ ダブルクリック: リセット</div></div>
+<script nonce="${nonce}">
+  const canvas = document.getElementById('canvas');
+  const svg = canvas.querySelector('svg');
+  let scale = 1, tx = 0, ty = 0, panning = false, sx = 0, sy = 0;
+  function apply() { svg.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')'; }
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    tx = mx - (mx - tx) * factor;
+    ty = my - (my - ty) * factor;
+    scale *= factor;
+    apply();
+  }, { passive: false });
+  canvas.addEventListener('mousedown', (e) => {
+    panning = true; sx = e.clientX - tx; sy = e.clientY - ty;
+    canvas.classList.add('panning');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!panning) return; tx = e.clientX - sx; ty = e.clientY - sy; apply();
+  });
+  window.addEventListener('mouseup', () => { panning = false; canvas.classList.remove('panning'); });
+  canvas.addEventListener('dblclick', () => { scale = 1; tx = 0; ty = 0; apply(); });
+  apply();
+</script>
+</body>
+</html>`;
+}
+
+/**
+ * file 内のクラス（simpleName）の Icon 図形を extends を辿って収集する。
+ * 基底クラスの graphics を先（下）に、派生クラスを後（上）に積む。
+ * 返り値 {coord, graphics}。graphics が空なら Icon 無し。
+ */
+function collectIconFromFile(file, simpleName, rootMap, seen) {
+  const key = file + "::" + simpleName;
+  if (seen.has(key)) return { coord: null, graphics: [] };
+  seen.add(key);
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (_) {
+    return { coord: null, graphics: [] };
+  }
+  const body = symbols.extractClassBody(text, simpleName) || text;
+  const dir = path.dirname(file);
+  const merged = { coord: null, graphics: [] };
+  for (const base of graphics.parseExtends(body)) {
+    let bcls = symbols.resolveClass(base, rootMap);
+    if (!bcls) {
+      const q = util.qualifiedName(dir);
+      if (q) bcls = symbols.resolveClass(q + "." + base, rootMap);
+    }
+    if (bcls && bcls.file) {
+      const bi = collectIconFromFile(
+        bcls.file,
+        base.split(".").pop(),
+        rootMap,
+        seen
+      );
+      if (bi.graphics.length) merged.graphics.push(...bi.graphics);
+      if (!merged.coord && bi.coord) merged.coord = bi.coord;
+    }
+  }
+  const own = graphics.parseIcon(body);
+  if (own) {
+    if (own.graphics.length) merged.graphics.push(...own.graphics);
+    if (own.coord) merged.coord = own.coord;
+  }
+  return merged;
+}
+
+async function showDiagram(doc) {
+  if (!doc || doc.languageId !== "modelica") {
+    vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
+    return;
+  }
+  const { className } = resolveTarget(doc);
+  const text = doc.getText();
+  const comps = symbols.parseComponents(text);
+  const placements = graphics.parseComponentPlacements(text, comps);
+  const connections = graphics.parseConnections(text);
+  if (!placements.length && !connections.length) {
+    vscode.window.showInformationMessage(
+      `Modelica: ${className || "このモデル"} に図示できるコンポーネント/接続がありません。`
+    );
+    return;
+  }
+  const extent = graphics.parseDiagramExtent(text);
+
+  // 各コンポーネント型の Icon 図形（extends 継承込み）を解決・キャッシュ
+  const rootMap = await getRootMap();
+  const dirQ = util.qualifiedName(path.dirname(doc.uri.fsPath));
+  const iconCache = new Map();
+  const iconForType = (type) => {
+    if (iconCache.has(type)) return iconCache.get(type);
+    let icon = null;
+    let cls = symbols.resolveClass(type, rootMap);
+    if (!cls && dirQ) cls = symbols.resolveClass(dirQ + "." + type, rootMap);
+    if (cls && cls.file) {
+      const merged = collectIconFromFile(
+        cls.file,
+        type.split(".").pop(),
+        rootMap,
+        new Set()
+      );
+      if (merged.graphics.length) {
+        if (!merged.coord)
+          merged.coord = { xmin: -100, ymin: -100, xmax: 100, ymax: 100 };
+        icon = merged;
+      }
+    }
+    iconCache.set(type, icon);
+    return icon;
+  };
+
+  const renderComponent = (c) => {
+    const icon = iconForType(c.type);
+    if (!icon) return null; // 名前付きボックスにフォールバック
+    const [[e1x, e1y], [e2x, e2y]] = c.extent;
+    const x1 = c.origin[0] + e1x;
+    const y1 = c.origin[1] + e1y;
+    const x2 = c.origin[0] + e2x;
+    const y2 = c.origin[1] + e2y;
+    const box = {
+      xlo: Math.min(x1, x2),
+      xhi: Math.max(x1, x2),
+      ylo: Math.min(y1, y2),
+      yhi: Math.max(y1, y2),
+    };
+    const tf = (x, y) => [x, -y]; // Modelica 図面座標 → SVG（Y 反転）
+    const frag = graphics.renderIcon(icon, box, tf, { name: c.name });
+    if (!frag) return null;
+    const rot =
+      c.rotation && c.rotation !== 0
+        ? ` transform="rotate(${-c.rotation} ${c.origin[0]} ${-c.origin[1]})"`
+        : "";
+    const shortType = String(c.type).split(".").pop();
+    return `<g${rot}>${frag}<title>${c.name} : ${shortType}</title></g>`;
+  };
+
+  const svg = graphics.buildDiagramSvg(placements, connections, extent, {
+    renderComponent,
+    compFill:
+      "var(--vscode-editor-inactiveSelectionBackground, rgba(120,160,220,0.15))",
+    compStroke: "var(--vscode-focusBorder, #5a8fd6)",
+    textColor: "var(--vscode-editor-foreground, #ccc)",
+  });
+
+  if (!diagramPanel) {
+    diagramPanel = vscode.window.createWebviewPanel(
+      "modelicaDiagram",
+      "Modelica Diagram",
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: true }
+    );
+    diagramPanel.onDidDispose(() => {
+      diagramPanel = undefined;
+    });
+  }
+  diagramPanel.title = `Diagram: ${className || ""}`.trim();
+  diagramPanel.webview.html = getDiagramHtml(
+    diagramPanel.webview,
+    className || "",
+    svg
+  );
+  diagramPanel.reveal(vscode.ViewColumn.Beside, true);
+}
+
+// =====================================================================
+// annotation 非表示（折りたたみトグル）
+// =====================================================================
+
+const foldingRangeProvider = {
+  provideFoldingRanges(document) {
+    return annotations
+      .findAnnotationRanges(document.getText())
+      .map(
+        (r) =>
+          new vscode.FoldingRange(
+            r.startLine,
+            r.endLine,
+            vscode.FoldingRangeKind.Region
+          )
+      );
+  },
+};
+
+async function toggleAnnotations() {
+  const ed = vscode.window.activeTextEditor;
+  if (!ed || ed.document.languageId !== "modelica") {
+    vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
+    return;
+  }
+  const lines = annotations
+    .findAnnotationRanges(ed.document.getText())
+    .map((r) => r.startLine);
+  if (!lines.length) {
+    vscode.window.setStatusBarMessage(
+      "Modelica: 折りたためる annotation がありません",
+      3000
+    );
+    return;
+  }
+  const key = ed.document.uri.toString();
+  if (annotationsHidden.has(key)) {
+    annotationsHidden.delete(key);
+    await vscode.commands.executeCommand("editor.unfold", {
+      selectionLines: lines,
+    });
+    vscode.window.setStatusBarMessage("Modelica: annotation を表示", 3000);
+  } else {
+    annotationsHidden.add(key);
+    await vscode.commands.executeCommand("editor.fold", {
+      levels: 1,
+      selectionLines: lines,
+    });
+    vscode.window.setStatusBarMessage("Modelica: annotation を非表示", 3000);
+  }
+}
+
+// =====================================================================
+// activate / deactivate
+// =====================================================================
+
+function activate(context) {
+  extContext = context;
+  const createCommands = {
+    "modelica.newModel": "model",
+    "modelica.newBlock": "block",
+    "modelica.newRecord": "record",
+    "modelica.newConnector": "connector",
+    "modelica.newFunction": "function",
+    "modelica.newType": "type",
+    "modelica.newPackage": "package",
+  };
+  for (const [command, kind] of Object.entries(createCommands)) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(command, (uri) => createEntity(kind, uri))
+    );
+  }
+
+  diagnostics = vscode.languages.createDiagnosticCollection("modelica");
+  output = vscode.window.createOutputChannel("Modelica");
+  context.subscriptions.push(diagnostics, output);
+
+  // ① go-to-definition
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider(
+      { language: "modelica" },
+      definitionProvider
+    )
+  );
+  // ② 補完
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      { language: "modelica" },
+      completionProvider,
+      "."
+    )
+  );
+  // ③ リネーム
+  context.subscriptions.push(
+    vscode.languages.registerRenameProvider(
+      { language: "modelica" },
+      renameProvider
+    )
+  );
+  // Documentation 表示 / annotation 折りたたみ
+  context.subscriptions.push(
+    vscode.languages.registerFoldingRangeProvider(
+      { language: "modelica" },
+      foldingRangeProvider
+    ),
+    vscode.commands.registerCommand("modelica.showDocumentation", () =>
+      showDocumentation(
+        vscode.window.activeTextEditor &&
+          vscode.window.activeTextEditor.document
+      )
+    ),
+    vscode.commands.registerCommand("modelica.toggleAnnotations", () =>
+      toggleAnnotations()
+    ),
+    vscode.commands.registerCommand("modelica.showDiagram", () =>
+      showDiagram(
+        vscode.window.activeTextEditor &&
+          vscode.window.activeTextEditor.document
+      )
+    )
+  );
+  // package.mo の増減でライブラリルート表を無効化
+  const pkgWatcher = vscode.workspace.createFileSystemWatcher("**/package.mo");
+  const invalidateRootMap = () => {
+    rootMapCache = null;
+  };
+  pkgWatcher.onDidCreate(invalidateRootMap);
+  pkgWatcher.onDidDelete(invalidateRootMap);
+  context.subscriptions.push(pkgWatcher);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("modelica.check", () =>
+      runCheck(vscode.window.activeTextEditor && vscode.window.activeTextEditor.document)
+    ),
+    vscode.commands.registerCommand("modelica.simulate", () =>
+      openSimulationSetup(
+        vscode.window.activeTextEditor && vscode.window.activeTextEditor.document
+      )
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.languageId === "modelica" && getConfig().checkOnSave) {
+        runCheck(doc);
+      }
+    })
+  );
+}
+
+function deactivate() {}
+
+module.exports = { activate, deactivate };
+
+// 単体検証用に内部の純粋関数を公開
+module.exports._internal = {
+  isValidIdent,
+  qualifiedName,
+  renderTemplate,
+  addToPackageOrder,
+  updateParentOrder,
+  classNameForFile,
+  findLibraryRoot,
+  sanitizeOptions,
+  effectiveIntervals,
+  cleanBuildDir,
+};

@@ -1,0 +1,4 @@
+[submodule "ref/ModelicaStandardLibrary"]
+	path = ref/ModelicaStandardLibrary
+	url = https://github.com/modelica/ModelicaStandardLibrary.git
+	branch = maint/4.1.x

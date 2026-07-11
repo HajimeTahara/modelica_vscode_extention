@@ -1,0 +1,8 @@
+{
+  "name": "modelica-graphics",
+  "version": "0.1.0",
+  "description": "Modelica のグラフィカルアノテーション解析と SVG 描画の共通ライブラリ（vscode 非依存・プレーン JS）",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": ["modelica", "graphics", "annotation", "icon", "diagram", "svg"]
+}

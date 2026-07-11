@@ -1,0 +1,242 @@
+{
+  "name": "modelica-vscode",
+  "displayName": "Modelica Language",
+  "description": "Modelica 言語のシンタックスハイライトと言語サポート（EAST ライブラリ開発用）",
+  "version": "0.14.1",
+  "publisher": "east",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "modelica",
+    "mo",
+    "OpenModelica",
+    "EAST"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "modelica",
+        "aliases": [
+          "Modelica",
+          "modelica"
+        ],
+        "extensions": [
+          ".mo"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "modelica",
+        "scopeName": "source.modelica",
+        "path": "./syntaxes/modelica.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Modelica",
+      "properties": {
+        "modelica.omcPath": {
+          "type": "string",
+          "default": "omc",
+          "description": "OpenModelica コンパイラ (omc) の実行ファイルパス。PATH に通っていれば \"omc\" のままでよい。"
+        },
+        "modelica.checkOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "保存時に checkModel を自動実行してエラーを表示する。"
+        },
+        "modelica.simulation.stopTime": {
+          "type": "number",
+          "default": 1.0,
+          "description": "シミュレーションの終了時刻 [s]。"
+        },
+        "modelica.simulation.numberOfIntervals": {
+          "type": "integer",
+          "default": 500,
+          "description": "シミュレーションの出力区間数。"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "modelica.newModel",
+        "title": "空モデル (model)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.newBlock",
+        "title": "ブロック (block, SISO)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.newRecord",
+        "title": "レコード (record)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.newConnector",
+        "title": "コネクタ (connector)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.newFunction",
+        "title": "関数 (function)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.newType",
+        "title": "型 (type)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.newPackage",
+        "title": "パッケージ (package)",
+        "category": "Modelica: 新規作成"
+      },
+      {
+        "command": "modelica.check",
+        "title": "モデルをチェック (checkModel)",
+        "category": "Modelica",
+        "icon": "$(check)"
+      },
+      {
+        "command": "modelica.simulate",
+        "title": "シミュレーション実行 (simulate)",
+        "category": "Modelica",
+        "icon": "$(play)"
+      },
+      {
+        "command": "modelica.showDocumentation",
+        "title": "Documentation を表示",
+        "category": "Modelica",
+        "icon": "$(book)"
+      },
+      {
+        "command": "modelica.toggleAnnotations",
+        "title": "annotation の表示/非表示",
+        "category": "Modelica",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "modelica.showDiagram",
+        "title": "ダイアグラムを表示",
+        "category": "Modelica",
+        "icon": "$(circuit-board)"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "modelica.newSubmenu",
+        "label": "Modelica 新規作成"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "submenu": "modelica.newSubmenu",
+          "group": "navigation@30",
+          "when": "explorerResourceIsFolder"
+        }
+      ],
+      "modelica.newSubmenu": [
+        {
+          "command": "modelica.newModel",
+          "group": "1_class@1"
+        },
+        {
+          "command": "modelica.newBlock",
+          "group": "1_class@2"
+        },
+        {
+          "command": "modelica.newRecord",
+          "group": "1_class@3"
+        },
+        {
+          "command": "modelica.newConnector",
+          "group": "1_class@4"
+        },
+        {
+          "command": "modelica.newFunction",
+          "group": "1_class@5"
+        },
+        {
+          "command": "modelica.newType",
+          "group": "1_class@6"
+        },
+        {
+          "command": "modelica.newPackage",
+          "group": "2_package@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "modelica.check",
+          "when": "resourceLangId == modelica",
+          "group": "modelica@1"
+        },
+        {
+          "command": "modelica.simulate",
+          "when": "resourceLangId == modelica",
+          "group": "modelica@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "modelica.check",
+          "when": "resourceLangId == modelica",
+          "group": "navigation@1"
+        },
+        {
+          "command": "modelica.simulate",
+          "when": "resourceLangId == modelica",
+          "group": "navigation@2"
+        },
+        {
+          "command": "modelica.showDocumentation",
+          "when": "resourceLangId == modelica",
+          "group": "navigation@3"
+        },
+        {
+          "command": "modelica.toggleAnnotations",
+          "when": "resourceLangId == modelica",
+          "group": "navigation@4"
+        },
+        {
+          "command": "modelica.showDiagram",
+          "when": "resourceLangId == modelica",
+          "group": "navigation@5"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "modelica.check",
+          "when": "resourceLangId == modelica"
+        },
+        {
+          "command": "modelica.simulate",
+          "when": "resourceLangId == modelica"
+        },
+        {
+          "command": "modelica.showDocumentation",
+          "when": "resourceLangId == modelica"
+        },
+        {
+          "command": "modelica.toggleAnnotations",
+          "when": "resourceLangId == modelica"
+        },
+        {
+          "command": "modelica.showDiagram",
+          "when": "resourceLangId == modelica"
+        }
+      ]
+    }
+  }
+}
