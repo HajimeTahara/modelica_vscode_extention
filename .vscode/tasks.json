@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "compile",
+      "path": "app",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$tsc",
+      "label": "npm: compile - app",
+      "detail": "app/ の TypeScript を app/out/ へコンパイルする"
+    },
+    {
+      "type": "npm",
+      "script": "watch",
+      "path": "app",
+      "isBackground": true,
+      "problemMatcher": "$tsc-watch",
+      "label": "npm: watch - app",
+      "detail": "app/ の TypeScript を監視してコンパイルし続ける"
+    }
+  ]
+}

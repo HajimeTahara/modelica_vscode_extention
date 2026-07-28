@@ -1,23 +1,33 @@
 // Modelica Packages ツリー（Activity Bar）— vscode 依存の UI 層。
 //
 // 表示単位はファイル/フォルダではなく Modelica の名前空間（Modelica.Blocks.Sources.Sine 等）。
-// 解析本体は vscode 非依存の src/symbols.js に置いたままとし、ここでは
+// 解析本体は vscode 非依存の src/symbols.ts に置いたままとし、ここでは
 // 「修飾名 → TreeItem」の変換と遅延展開だけを担当する（omc 不要・オフラインで動く）。
 
-// vscode モジュールはランタイム外（単体テスト等）では読み込めないためガードする。
-let vscode;
-try {
-  vscode = require("vscode");
-} catch (_) {
-  vscode = null;
-}
-const symbols = require("./symbols");
+import type * as vscodeTypes from "vscode";
+import { vscode } from "./vscodeApi";
+import * as symbols from "./symbols";
+import type { ChildItem, ClassKind, RootMap } from "./symbols";
 
-const TreeItemBase = vscode ? vscode.TreeItem : class {};
+// vscode が読めない環境ではダミーを基底にして、モジュール読み込み自体は成功させる。
+const TreeItemBase: typeof vscodeTypes.TreeItem =
+  (vscode && vscode.TreeItem) ||
+  (class {} as unknown as typeof vscodeTypes.TreeItem);
+
+/** ModelicaTreeNode の生成引数。 */
+export interface ModelicaTreeNodeInit {
+  label: string;
+  qname: string;
+  kind: ClassKind;
+  expandable: boolean;
+}
 
 /** ツリー項目。Modelica の完全修飾名（qname）を持つ。 */
-class ModelicaTreeNode extends TreeItemBase {
-  constructor({ label, qname, kind, expandable }) {
+export class ModelicaTreeNode extends TreeItemBase {
+  readonly qname: string;
+  readonly kind: ClassKind;
+
+  constructor({ label, qname, kind, expandable }: ModelicaTreeNodeInit) {
     super(
       label,
       expandable
@@ -46,24 +56,33 @@ class ModelicaTreeNode extends TreeItemBase {
  * Modelica の名前空間ツリーを供給する TreeDataProvider。
  * getChildren() は展開時にだけ呼ばれるため、初期表示で全ツリーを総走査しない。
  */
-class ModelicaTreeProvider {
-  /** @param getRootMap () => Promise<{ルートパッケージ名: ディレクトリ}> */
-  constructor(getRootMap) {
+export class ModelicaTreeProvider
+  implements vscodeTypes.TreeDataProvider<ModelicaTreeNode>
+{
+  private readonly getRootMap: () => Promise<RootMap>;
+  private readonly _onDidChangeTreeData: vscodeTypes.EventEmitter<
+    ModelicaTreeNode | undefined
+  >;
+  readonly onDidChangeTreeData: vscodeTypes.Event<ModelicaTreeNode | undefined>;
+  /** 展開 1 回分の listPackageChildren 結果（ファイル読み込みの重複を避ける）。 */
+  private readonly _childCache = new Map<string, ChildItem[]>();
+  private _timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(getRootMap: () => Promise<RootMap>) {
     this.getRootMap = getRootMap;
-    this._onDidChangeTreeData = new vscode.EventEmitter();
+    this._onDidChangeTreeData = new vscode.EventEmitter<
+      ModelicaTreeNode | undefined
+    >();
     this.onDidChangeTreeData = this._onDidChangeTreeData.event;
-    // 展開 1 回分の listPackageChildren 結果（ファイル読み込みの重複を避ける）。
-    this._childCache = new Map();
-    this._timer = null;
   }
 
-  refresh() {
+  refresh(): void {
     this._childCache.clear();
-    this._onDidChangeTreeData.fire();
+    this._onDidChangeTreeData.fire(undefined);
   }
 
   /** ファイル監視の連続イベントをまとめて 1 回の refresh にする。 */
-  refreshSoon(delayMs) {
+  refreshSoon(delayMs?: number): void {
     if (this._timer) clearTimeout(this._timer);
     this._timer = setTimeout(() => {
       this._timer = null;
@@ -71,24 +90,25 @@ class ModelicaTreeProvider {
     }, delayMs || 300);
   }
 
-  dispose() {
+  dispose(): void {
     if (this._timer) clearTimeout(this._timer);
     this._onDidChangeTreeData.dispose();
   }
 
-  getTreeItem(element) {
+  getTreeItem(element: ModelicaTreeNode): ModelicaTreeNode {
     return element;
   }
 
-  async getChildren(element) {
-    let rootMap;
+  async getChildren(element?: ModelicaTreeNode): Promise<ModelicaTreeNode[]> {
+    let rootMap: RootMap;
     try {
       rootMap = await this.getRootMap();
     } catch (_) {
       return [];
     }
 
-    // ルート: ワークスペース内ライブラリのルートパッケージ（package.mo の宣言名）
+    // ルート: ワークスペース内ライブラリのルートパッケージ（package.mo の宣言名）と、
+    // package.mo に属さない単一ファイルの最上位クラス。
     if (!element) {
       return Object.keys(rootMap)
         .sort((a, b) => a.localeCompare(b))
@@ -97,8 +117,8 @@ class ModelicaTreeProvider {
             new ModelicaTreeNode({
               label: name,
               qname: name,
-              kind: "package",
-              expandable: true,
+              kind: symbols.rootKind(rootMap, name),
+              expandable: this._isExpandable(name, rootMap),
             })
         );
     }
@@ -120,8 +140,9 @@ class ModelicaTreeProvider {
   }
 
   /** qname 直下の子（名前順）。 */
-  _children(qname, rootMap) {
-    if (this._childCache.has(qname)) return this._childCache.get(qname);
+  private _children(qname: string, rootMap: RootMap): ChildItem[] {
+    const cached = this._childCache.get(qname);
+    if (cached) return cached;
     const items = symbols.listPackageChildren(qname, rootMap);
     items.sort((a, b) => a.name.localeCompare(b.name));
     this._childCache.set(qname, items);
@@ -134,7 +155,7 @@ class ModelicaTreeProvider {
    *  - 単一ファイルのクラス   … ネストクラスを持つときだけ展開可
    *  - ファイル内ネストクラス … それ以上は辿れないため展開不可
    */
-  _isExpandable(qname, rootMap) {
+  private _isExpandable(qname: string, rootMap: RootMap): boolean {
     const c = symbols.resolveContainer(qname, rootMap);
     if (!c) return false;
     if (c.type === "dir") return true;
@@ -143,7 +164,10 @@ class ModelicaTreeProvider {
 }
 
 /** ノードの定義位置を開く。ネストクラスは定義行へジャンプする。 */
-async function openNode(node, rootMap) {
+export async function openNode(
+  node: ModelicaTreeNode | undefined,
+  rootMap: RootMap
+): Promise<void> {
   if (!node || !node.qname) return;
   const loc = symbols.resolveClass(node.qname, rootMap);
   if (!loc || !loc.file) {
@@ -158,5 +182,3 @@ async function openNode(node, rootMap) {
     selection: new vscode.Range(pos, pos),
   });
 }
-
-module.exports = { ModelicaTreeNode, ModelicaTreeProvider, openNode };

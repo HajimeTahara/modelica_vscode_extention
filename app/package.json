@@ -2,7 +2,7 @@
   "name": "modelica-vscode",
   "displayName": "Modelica Language",
   "description": "Modelica 言語のシンタックスハイライトと言語サポート（EAST ライブラリ開発用）",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "publisher": "east",
   "license": "MIT",
   "engines": {
@@ -17,15 +17,28 @@
     "OpenModelica",
     "EAST"
   ],
-  "main": "./src/extension.js",
+  "main": "./out/src/extension.js",
   "activationEvents": [],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "compile": "tsc -p ./",
+    "rebuild": "npm run clean && npm run compile",
+    "watch": "tsc -w -p ./",
+    "typecheck": "tsc --noEmit -p ./",
+    "vscode:prepublish": "npm run rebuild"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.5.0"
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
           "id": "modelica",
           "title": "Modelica",
-          "icon": "resources/modelica.svg"
+          "icon": "resources/modelica-icon-lg.png"
         }
       ]
     },
@@ -40,7 +53,7 @@
     "viewsWelcome": [
       {
         "view": "modelica.packageTree",
-        "contents": "ワークスペースに Modelica パッケージ（package.mo）が見つかりません。\nライブラリのフォルダを開くか、フォルダを右クリックして「Modelica 新規作成」→「パッケージ」で作成してください。\n[再読み込み](command:modelica.packageTree.refresh)"
+        "contents": "ワークスペースに Modelica のクラス（.mo）が見つかりません。\nライブラリのフォルダを開くか、フォルダを右クリックして「Modelica 新規作成」から作成してください。\n[再読み込み](command:modelica.packageTree.refresh)"
       }
     ],
     "languages": [

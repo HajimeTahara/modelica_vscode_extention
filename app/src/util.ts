@@ -1,20 +1,20 @@
 // Modelica のパス/名前まわりの純粋ユーティリティ（vscode 非依存）。
-// extension.js と omc 連携の双方から使う。
+// extension.ts と omc 連携の双方から使う。
 
-const fs = require("fs");
-const path = require("path");
+import * as fs from "fs";
+import * as path from "path";
 
 /** Modelica 識別子として妥当か */
-function isValidIdent(name) {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+export function isValidIdent(name: string | undefined): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name ?? "");
 }
 
 /**
  * dir の Modelica パッケージ修飾名。package.mo を持つ限り親をたどりドット連結。
  * 例: .../modelica/EAST/Blocks/Math -> "EAST.Blocks.Math"。package.mo が無ければ ""。
  */
-function qualifiedName(dir) {
-  const parts = [];
+export function qualifiedName(dir: string): string {
+  const parts: string[] = [];
   let cur = dir;
   while (fs.existsSync(path.join(cur, "package.mo"))) {
     parts.unshift(path.basename(cur));
@@ -29,9 +29,9 @@ function qualifiedName(dir) {
  * startDir を含む構造化ライブラリのルート（package.mo を持つ最上位の祖先）を返す。
  * package.mo が無ければ null。
  */
-function findLibraryRoot(startDir) {
+export function findLibraryRoot(startDir: string): string | null {
   let cur = startDir;
-  let root = null;
+  let root: string | null = null;
   while (fs.existsSync(path.join(cur, "package.mo"))) {
     root = cur;
     const parent = path.dirname(cur);
@@ -46,7 +46,7 @@ function findLibraryRoot(startDir) {
  * package.mo なら所属ディレクトリの修飾名そのもの、
  * それ以外は <ディレクトリ修飾名>.<ファイル名(拡張子なし)>。
  */
-function classNameForFile(filePath) {
+export function classNameForFile(filePath: string): string {
   const dir = path.dirname(filePath);
   const base = path.basename(filePath);
   const q = qualifiedName(dir);
@@ -55,9 +55,3 @@ function classNameForFile(filePath) {
   return q ? `${q}.${stem}` : stem;
 }
 
-module.exports = {
-  isValidIdent,
-  qualifiedName,
-  findLibraryRoot,
-  classNameForFile,
-};

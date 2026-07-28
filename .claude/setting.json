@@ -3,7 +3,7 @@
 
   "permissions": {
       "deny": [
-        "Edit(/lib/**)"
+        "Edit(/ref/**)"
       ],
       
       "allow": [

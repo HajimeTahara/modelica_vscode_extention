@@ -5,23 +5,36 @@
 # Modelica Language (modelica_vscode_extention)
 
 Modelica (`.mo`) 言語向けの VSCode 拡張機能。EAST ライブラリ開発を支援する。
-プレーン JS 実装で**ビルド不要・依存パッケージなし**。ナビ/補完/リネームは自前の軽量シンボル
-解決で動き（OpenModelica 不要）、コンパイル/計算実行のみ OpenModelica `omc` に委譲する
-ハイブリッド構成。
+TypeScript 実装で**ランタイム依存パッケージなし**（ビルドにのみ `typescript` を使う）。
+ナビ/補完/リネームは自前の軽量シンボル解決で動き（OpenModelica 不要）、
+コンパイル/計算実行のみ OpenModelica `omc` に委譲するハイブリッド構成。
+
+拡張機能の実体はリポジトリ直下の **`app/`** に置いてある。
 
 ## インストール
 
-本フォルダ内の `install.bat` を実行する（install / update 兼用）。
+リポジトリ直下の `install.bat` を実行する（install / update 兼用）。
 
 ```bat
 install.bat              REM インストール / 更新
 install.bat --uninstall  REM アンインストール
 ```
 
-`%USERPROFILE%\.vscode\extensions\` へコピーされる。**実行後は VSCode を再起動**すると
-`.mo` ファイルに自動適用される。バージョンを上げても古いフォルダは残らない。
+`install.bat` は次の順で処理する。Node.js（`npm`）が必要。
 
-開発時は本フォルダを VSCode で開き `F5`（拡張機能の開発ホスト）でも試せる。
+1. `app/node_modules` が無ければ `npm install`
+2. `npm run rebuild`（`out/` を消してからコンパイル＝クリーンビルド）
+3. 既存の `east.modelica-vscode-*` を全削除
+4. `app/` を `%USERPROFILE%\.vscode\extensions\` へコピー（TS ソース・ビルド設定・
+   `node_modules` は除外し、実行に必要な `out/` とアセットだけ）
+
+**ビルドが失敗した場合は 3 以降に進まない**ので、既にインストール済みの版はそのまま残る。
+**実行後は VSCode を再起動**すると `.mo` ファイルに自動適用される。
+バージョンを上げても古いフォルダは残らない。
+
+開発時はリポジトリを VSCode で開き `F5`（拡張機能の開発ホスト）でも試せる。
+`F5` は起動前に `app/` のビルドを自動実行する。編集しながら試すなら
+`npm: watch - app` タスクを走らせておく。
 
 ## 機能一覧
 
@@ -53,6 +66,11 @@ Activity Bar（左端の縦帯）の **Modelica タブ**を開くと、**Modelic
 
 - ルートはワークスペース内ライブラリのルートパッケージ。名前は `package.mo` の宣言から取るため、
   フォルダ名と違っていてもよい（フォルダ `ModelicaStandardLibrary` → 表示は `Modelica`）。
+- ワークスペースのルートに `package.mo` が無くてもよい。
+  - 下位フォルダのライブラリ（`ref/ModelicaStandardLibrary/Modelica/` 等）は従来どおり検出する。
+  - どの `package.mo` にも属さない `.mo` は、その 1 ファイルが最上位クラスとしてルートに並ぶ
+    （単一ファイルライブラリ `Complex.mo` や、ばら置きのモデルなど）。中のクラスも展開できる。
+  - 探索範囲はワークスペースフォルダから 3 階層まで（構造化ライブラリの中は除外）。
 - 展開すると `Modelica.Blocks.Sources.Sine` のようにパッケージ／クラスを辿れる。
   展開したときにだけ中身を読むため、MSL のような大きなライブラリでも初期表示は重くならない。
 - 項目をクリックすると定義ファイルを開く。1 ファイルに複数クラスがある場合は**定義行へジャンプ**する。
@@ -133,8 +151,8 @@ Documentation が無いモデルではその旨を通知する。
 - `Diagram(coordinateSystem(extent=…))` を座標系に採用。Modelica の Y 上向きは SVG 用に反転する。
 - **パン/ズーム** — ドラッグでパン、ホイールでカーソル基点のズーム、ダブルクリックでリセット。
 
-グラフィック解析/描画は同梱ライブラリ **`modelicaGraphics/`**（拡張フォルダ直下・vscode 非依存・
-プレーン JS・依存ゼロ）に切り出している。
+グラフィック解析/描画は同梱ライブラリ **`app/modelicaGraphics/`**（vscode 非依存・依存ゼロ）に
+切り出している。
 
 ## annotation の表示/非表示
 
@@ -258,34 +276,67 @@ C:\Program Files\OpenModelica<バージョン>-64bit\bin
 
 ### ファイル構成
 
+拡張機能の実体はすべて `app/` 配下。リポジトリ直下にはドキュメント・参照ライブラリ・
+インストーラだけを置く。
+
 ```text
 modelica_vscode_extention/
-├── install.bat                      # install / update / uninstall スクリプト
-├── package.json                     # マニフェスト（言語/文法/コマンド/メニュー/設定）
-├── language-configuration.json      # 括弧/コメント/インデント設定
-├── src/
-│   ├── extension.js                 # エントリ（コマンド登録・各プロバイダ）
-│   ├── util.js                      # パス・修飾名ユーティリティ（vscode 非依存）
-│   ├── omc.js                       # omc 連携（.mos 生成・実行・出力パース）
-│   ├── annotations.js               # annotation の読み書き（experiment/Documentation/範囲抽出）
-│   ├── symbols.js                   # シンボル解決（ジャンプ/補完/リネームの基盤・vscode 非依存）
-│   ├── modelicaTree.js              # Modelica Packages ツリー（TreeDataProvider・UI 層）
-│   └── graphics.js                  # modelicaGraphics への薄いアダプタ
-├── resources/
-│   └── modelica.svg                 # Activity Bar 用アイコン（単色 SVG）
-├── syntaxes/
-│   └── modelica.tmLanguage.json     # TextMate 文法（ハイライト定義）
-└── modelicaGraphics/                # 同梱: グラフィック解析/SVG 描画ライブラリ（vscode 非依存）
-    ├── index.js                     # 公開 API のエントリ
-    └── src/
-        ├── parse.js                 # 低レベル解析（括弧/配列/brace 値）
-        ├── diagram.js               # 配置・接続の解析と buildDiagramSvg
-        └── icon.js                  # Icon パース＋プリミティブ→SVG
+├── install.bat                          # build → install / update / uninstall スクリプト
+├── README.md / LICENSE / docs/
+├── ref/ModelicaStandardLibrary/         # 参照用 MSL（git submodule）
+└── app/                                 # ← VSCode 拡張の実体（これがそのまま配布物になる）
+    ├── package.json                     # マニフェスト（言語/文法/コマンド/メニュー/設定）
+    ├── tsconfig.json                    # TS ビルド設定（strict・out/ へ出力）
+    ├── language-configuration.json      # 括弧/コメント/インデント設定
+    ├── src/
+    │   ├── extension.ts                 # エントリ（コマンド登録・各プロバイダ）
+    │   ├── util.ts                      # パス・修飾名ユーティリティ（vscode 非依存）
+    │   ├── omc.ts                       # omc 連携（.mos 生成・実行・出力パース）
+    │   ├── annotations.ts               # annotation の読み書き（experiment/Documentation/範囲抽出）
+    │   ├── symbols.ts                   # シンボル解決（ジャンプ/補完/リネームの基盤・vscode 非依存）
+    │   ├── modelicaTree.ts              # Modelica Packages ツリー（TreeDataProvider・UI 層）
+    │   ├── graphics.ts                  # modelicaGraphics への薄いアダプタ
+    │   └── vscodeApi.ts                 # vscode モジュールの読み込みガード
+    ├── resources/
+    │   ├── modelica-icon-lg.png         # Activity Bar 用アイコン（透過 PNG・テーマ色で塗られる）
+    │   └── modelica.svg                 # 旧 Activity Bar 用アイコン（単色 SVG・未使用）
+    ├── syntaxes/
+    │   └── modelica.tmLanguage.json     # TextMate 文法（ハイライト定義）
+    ├── modelicaGraphics/                # 同梱: グラフィック解析/SVG 描画ライブラリ（vscode 非依存）
+    │   ├── index.ts                     # 公開 API のエントリ
+    │   └── src/
+    │       ├── parse.ts                 # 低レベル解析（括弧/配列/brace 値）＋座標型
+    │       ├── diagram.ts               # 配置・接続の解析と buildDiagramSvg
+    │       └── icon.ts                  # Icon パース＋プリミティブ→SVG
+    └── out/                             # ビルド成果物（git 管理外・実行されるのはこちら）
 ```
 
-プレーン JS のためビルド不要。`omc` 連携は Node 標準 `child_process` のみで依存パッケージなし。
-`util.js` / `omc.js` / `annotations.js` / `symbols.js` は vscode に依存しないため、
-Node 単体で純粋ロジックの検証ができる。
+### ビルド
+
+```bat
+cd app
+npm install          REM 初回のみ（typescript / @types のみ）
+npm run compile      REM out/ へコンパイル（差分）
+npm run rebuild      REM out/ を消してからコンパイル（install.bat が使う）
+npm run clean        REM out/ を消すだけ
+npm run watch        REM 監視ビルド
+npm run typecheck    REM 型検査のみ（出力なし）
+```
+
+普段の開発は `compile` / `watch` でよい。`tsc` はソースをリネーム・削除しても `out/` の
+古い `.js` を消さないため、配布物を作る `install.bat` は必ず `rebuild` を使う。
+
+`package.json` の `main` は `./out/src/extension.js`。`rootDir` を `app/` にしているので
+`out/src/` と `out/modelicaGraphics/` の相対関係がソースと同じになり、
+`graphics.ts` の `../modelicaGraphics` がビルド後もそのまま解決される。
+
+TypeScript は `strict` に加え `noUncheckedIndexedAccess` を有効にしている。文字走査は
+`text[i]`（`string | undefined`）ではなく `text.charAt(i)`（範囲外は `""`）を使う。
+
+`omc` 連携は Node 標準 `child_process` のみでランタイム依存パッケージはない。
+`util` / `omc` / `annotations` / `symbols` / `modelicaGraphics` は vscode に依存しないため、
+ビルド後に Node 単体で純粋ロジックの検証ができる（`extension.js` 自体も
+`vscodeApi.ts` のガードにより VSCode 外から `require` できる）。
 
 ### ハイライトのデバッグ
 

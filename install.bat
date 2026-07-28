@@ -3,19 +3,22 @@ setlocal
 REM ============================================================
 REM  Modelica VSCode extension installer / updater
 REM    no args     : show interactive menu
-REM    --install   : install or update (idempotent)
+REM    --install   : build, then install or update (idempotent)
 REM    --uninstall : remove the installed extension
 REM
-REM  Removes ALL installed east.modelica-vscode-* versions, then
-REM  copies the current source in. Same command for first install
-REM  and for refreshing after edits / version bumps.
+REM  The extension itself lives in app\. Installing compiles the
+REM  TypeScript sources to app\out\ (npm required), removes ALL
+REM  installed east.modelica-vscode-* versions, then copies app\ in.
+REM  Same command for first install and for refreshing after edits.
 REM  Restart VSCode afterwards to load it.
-REM  Run this from inside the extension folder. See README.md.
+REM  Run this from the repository root. See README.md.
 REM ============================================================
 
-set "SRC=%~dp0"
-if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
-set "NAME=east.modelica-vscode-0.15.0"
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+set "SRC=%ROOT%\app"
+REM Keep in sync with app\package.json "version".
+set "NAME=east.modelica-vscode-0.15.1"
 set "EXTDIR=%USERPROFILE%\.vscode\extensions"
 set "DEST=%EXTDIR%\%NAME%"
 set "ROBOCOPY=%SystemRoot%\System32\robocopy.exe"
@@ -44,6 +47,26 @@ echo [INFO] Invalid option.
 goto menu
 
 :install
+REM ---- build TypeScript -> app\out ----
+REM Nothing is removed or copied until the build succeeds, so a failed build
+REM leaves any previously installed version untouched.
+where npm >nul 2>nul
+if errorlevel 1 goto no_npm
+echo Building TypeScript...
+pushd "%SRC%"
+if not exist "node_modules" (
+  echo   installing dev dependencies...
+  call npm install --no-audit --no-fund
+)
+if errorlevel 1 goto build_failed_pop
+REM Clean rebuild: tsc leaves stale .js in out\ when a source is renamed or
+REM deleted, and those would otherwise be shipped.
+call npm run rebuild
+if errorlevel 1 goto build_failed_pop
+popd
+if not exist "%SRC%\out\src\extension.js" goto build_failed
+echo   built: %SRC%\out
+
 if not exist "%EXTDIR%" mkdir "%EXTDIR%"
 
 REM ---- remove every installed version (handles updates / version bumps) ----
@@ -55,12 +78,16 @@ if exist "%EXTDIR%\east.modelica-vscode-*" (
   )
 )
 
-REM ---- copy current source ----
+REM ---- copy current build ----
 echo Installing Modelica extension...
 echo   from: %SRC%
 echo   to  : %DEST%
-REM modelicaGraphics is vendored under the extension folder, so this copy includes it.
-"%ROBOCOPY%" "%SRC%" "%DEST%" /E /R:2 /W:1 /XD node_modules .git .vscode /XF *.map
+REM modelicaGraphics is vendored under app\ and compiles into out\, so out\ has it.
+REM TS sources / build config / dev deps are not needed at runtime; the source dirs
+REM are excluded by full path so out\modelicaGraphics (same basename) still gets copied.
+"%ROBOCOPY%" "%SRC%" "%DEST%" /E /R:2 /W:1 ^
+  /XD node_modules .git .vscode "%SRC%\src" "%SRC%\modelicaGraphics" ^
+  /XF *.map *.ts tsconfig.json package-lock.json
 set "RC=%ERRORLEVEL%"
 REM robocopy exit codes 0-7 mean success
 if %RC% GEQ 8 goto copy_failed
@@ -104,8 +131,23 @@ pause
 exit /b 1
 
 :no_src
-echo [ERROR] Source not found: %SRC%
-echo         Run this script from inside the extension folder.
+echo [ERROR] Extension source not found: %SRC%
+echo         Run this script from the repository root.
+pause
+exit /b 1
+
+:no_npm
+echo [ERROR] npm not found in PATH.
+echo         Node.js is required to build the TypeScript sources.
+echo         Install Node.js, or build manually with:
+echo           cd app ^&^& npm install ^&^& npm run compile
+pause
+exit /b 1
+
+:build_failed_pop
+popd
+:build_failed
+echo [ERROR] TypeScript build failed. See the messages above.
 pause
 exit /b 1
 

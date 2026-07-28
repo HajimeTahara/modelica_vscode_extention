@@ -1,0 +1,25 @@
+{
+  // rootDir を app 直下にすることで src/ と modelicaGraphics/ の相対関係が out/ でもそのまま保たれ、
+  // out/src/graphics.js から out/modelicaGraphics/index.js を "../modelicaGraphics" で解決できる。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "rootDir": ".",
+    "outDir": "out",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "declaration": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "modelicaGraphics/**/*.ts"],
+  "exclude": ["node_modules", "out"]
+}

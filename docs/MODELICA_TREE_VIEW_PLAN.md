@@ -3,6 +3,10 @@
 本書は、VS Code の Activity Bar に Modelica 専用ビューを追加し、ファイルツリーではなく
 Modelica のパッケージ/クラス構造としてツリー表示するための実装方針をまとめる。
 
+> **注記（実装後）** — 本方針は実装済み。その後リポジトリを再構成しており、本文中の
+> `src/*.js` / `package.json` は現在それぞれ `app/src/*.ts` / `app/package.json` を指す。
+> 最新の構成は [README.md](../README.md) の「ファイル構成」を参照。
+
 ## 目的
 
 - Activity Bar に `Modelica` 専用タブを追加する。

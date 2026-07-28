@@ -5,30 +5,42 @@
 //   - ⑤ 新規ファイル作成（model/block/record/connector/function/type/package）
 //   - ④ コンパイル・計算実行（omc 連携: checkModel / simulate）
 
-// vscode モジュールはランタイム外（単体テスト等）では読み込めないためガードする。
-let vscode;
-try {
-  vscode = require("vscode");
-} catch (_) {
-  vscode = null;
-}
-const fs = require("fs");
-const path = require("path");
-const net = require("net");
-const util = require("./util");
-const omc = require("./omc");
-const annotations = require("./annotations");
-const symbols = require("./symbols");
-const graphics = require("./graphics");
-const modelicaTree = require("./modelicaTree");
+import type * as vscodeTypes from "vscode";
+import { vscode } from "./vscodeApi";
+import * as fs from "fs";
+import * as path from "path";
+import * as net from "net";
+import * as util from "./util";
+import * as omc from "./omc";
+import * as annotations from "./annotations";
+import * as symbols from "./symbols";
+import * as graphics from "./graphics";
+import * as modelicaTree from "./modelicaTree";
+import type { RootMap } from "./symbols";
+import type { CoordExtent, IconDef, Placement, Point } from "./graphics";
 
 const { isValidIdent, qualifiedName, findLibraryRoot, classNameForFile } = util;
+
+/** catch した値からユーザ向けメッセージを取り出す。 */
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 // =====================================================================
 // ⑤ 新規ファイル作成
 // =====================================================================
 
-const KIND_LABEL = {
+/** 新規作成できる Modelica エンティティの種別。 */
+type EntityKind =
+  | "model"
+  | "block"
+  | "record"
+  | "connector"
+  | "function"
+  | "type"
+  | "package";
+
+const KIND_LABEL: Record<EntityKind, string> = {
   model: "空モデル",
   block: "ブロック (SISO)",
   record: "レコード",
@@ -38,7 +50,7 @@ const KIND_LABEL = {
   package: "パッケージ",
 };
 
-function renderTemplate(kind, name, within) {
+function renderTemplate(kind: EntityKind, name: string, within: string): string {
   const w = `within ${within};`;
   const doc = `  annotation (Documentation(info="<html>\n</html>"));`;
   switch (kind) {
@@ -62,9 +74,9 @@ function renderTemplate(kind, name, within) {
 }
 
 /** dir/package.order に name を追記する（重複時は何もしない） */
-function addToPackageOrder(dir, name) {
+function addToPackageOrder(dir: string, name: string): void {
   const orderPath = path.join(dir, "package.order");
-  let lines = [];
+  let lines: string[] = [];
   if (fs.existsSync(orderPath)) {
     lines = fs
       .readFileSync(orderPath, "utf8")
@@ -82,14 +94,14 @@ function addToPackageOrder(dir, name) {
  * （package.mo を持つ）のときだけ。トップパッケージ作成時に非パッケージの上位ディレクトリへ
  * package.order を作らないようにする。
  */
-function updateParentOrder(dir, name) {
+function updateParentOrder(dir: string, name: string): void {
   if (fs.existsSync(path.join(dir, "package.mo"))) {
     addToPackageOrder(dir, name);
   }
 }
 
 /** コマンド起動元から作成先ディレクトリを決定する */
-function resolveTargetDir(uri) {
+function resolveTargetDir(uri?: vscodeTypes.Uri): string | undefined {
   if (uri && uri.fsPath) {
     try {
       return fs.statSync(uri.fsPath).isDirectory()
@@ -104,11 +116,11 @@ function resolveTargetDir(uri) {
     return path.dirname(ed.document.uri.fsPath);
   }
   const folders = vscode.workspace.workspaceFolders;
-  if (folders && folders.length) return folders[0].uri.fsPath;
+  if (folders && folders.length) return folders[0]!.uri.fsPath;
   return undefined;
 }
 
-async function createEntity(kind, uri) {
+async function createEntity(kind: EntityKind, uri?: vscodeTypes.Uri): Promise<void> {
   const dir = resolveTargetDir(uri);
   if (!dir) {
     vscode.window.showErrorMessage(
@@ -128,7 +140,7 @@ async function createEntity(kind, uri) {
   if (!name) return;
 
   try {
-    let openPath;
+    let openPath: string;
     if (kind === "package") {
       const pkgDir = path.join(dir, name);
       if (fs.existsSync(pkgDir)) {
@@ -160,7 +172,7 @@ async function createEntity(kind, uri) {
     const doc = await vscode.workspace.openTextDocument(openPath);
     await vscode.window.showTextDocument(doc);
   } catch (err) {
-    vscode.window.showErrorMessage(`作成に失敗しました: ${err.message}`);
+    vscode.window.showErrorMessage(`作成に失敗しました: ${errorMessage(err)}`);
   }
 }
 
@@ -168,14 +180,22 @@ async function createEntity(kind, uri) {
 // ④ コンパイル・計算実行（omc 連携）
 // =====================================================================
 
-let diagnostics; // vscode.DiagnosticCollection
-let output; // vscode.OutputChannel
-let extContext; // vscode.ExtensionContext（workspaceState 用）
-let docPanel; // Documentation 表示の Webview（使い回し）
-let diagramPanel; // Diagram View の Webview（使い回し）
-const annotationsHidden = new Set(); // annotation を折りたたみ中のドキュメント URI
+let diagnostics!: vscodeTypes.DiagnosticCollection;
+let output!: vscodeTypes.OutputChannel;
+let extContext!: vscodeTypes.ExtensionContext; // workspaceState 用
+let docPanel: vscodeTypes.WebviewPanel | undefined; // Documentation 表示の Webview（使い回し）
+let diagramPanel: vscodeTypes.WebviewPanel | undefined; // Diagram View の Webview（使い回し）
+const annotationsHidden = new Set<string>(); // annotation を折りたたみ中のドキュメント URI
 
-function getConfig() {
+/** 拡張設定。 */
+interface ModelicaConfig {
+  omcPath: string;
+  checkOnSave: boolean;
+  stopTime: number;
+  intervals: number;
+}
+
+function getConfig(): ModelicaConfig {
   const c = vscode.workspace.getConfiguration("modelica");
   return {
     omcPath: c.get("omcPath", "omc"),
@@ -185,7 +205,7 @@ function getConfig() {
   };
 }
 
-function toSeverity(s) {
+function toSeverity(s: omc.OmcSeverity): vscodeTypes.DiagnosticSeverity {
   switch (s) {
     case "Error":
       return vscode.DiagnosticSeverity.Error;
@@ -197,9 +217,9 @@ function toSeverity(s) {
 }
 
 /** パース済みエラー配列をファイル別に DiagnosticCollection へ反映する */
-function applyDiagnostics(parsed) {
+function applyDiagnostics(parsed: omc.OmcDiagnostic[]): void {
   diagnostics.clear();
-  const byFile = new Map();
+  const byFile = new Map<string, vscodeTypes.Diagnostic[]>();
   for (const e of parsed) {
     // omc は 1 始まり・終端は包含。VSCode は 0 始まり・終端は排他。
     const range = new vscode.Range(
@@ -211,8 +231,12 @@ function applyDiagnostics(parsed) {
     const d = new vscode.Diagnostic(range, e.message, toSeverity(e.severity));
     d.source = "omc";
     const key = path.normalize(e.file);
-    if (!byFile.has(key)) byFile.set(key, []);
-    byFile.get(key).push(d);
+    let list = byFile.get(key);
+    if (!list) {
+      list = [];
+      byFile.set(key, list);
+    }
+    list.push(d);
   }
   for (const [file, ds] of byFile) {
     diagnostics.set(vscode.Uri.file(file), ds);
@@ -223,7 +247,7 @@ function applyDiagnostics(parsed) {
  * ワークスペース直下 .modelica-build にクラス名の完全ネストで実行用ディレクトリを用意する。
  * 例: EAST.Orbital.Examples.Foo -> .modelica-build/EAST/Orbital/Examples/Foo
  */
-function ensureBuildDir(referenceFsPath, className) {
+function ensureBuildDir(referenceFsPath: string, className: string): string {
   const wsFolder = vscode.workspace.getWorkspaceFolder(
     vscode.Uri.file(referenceFsPath)
   );
@@ -238,8 +262,15 @@ function ensureBuildDir(referenceFsPath, className) {
   return buildDir;
 }
 
+/** omc 実行の共通パラメータ。 */
+interface OmcTarget {
+  filePath: string;
+  loadTarget: string;
+  className: string;
+}
+
 /** 対象ドキュメントから omc 実行の共通パラメータを組み立てる */
-function resolveTarget(doc) {
+function resolveTarget(doc: vscodeTypes.TextDocument): OmcTarget {
   const filePath = doc.uri.fsPath;
   const root = findLibraryRoot(path.dirname(filePath));
   const loadTarget = root ? path.join(root, "package.mo") : filePath;
@@ -247,7 +278,7 @@ function resolveTarget(doc) {
   return { filePath, loadTarget, className };
 }
 
-async function runCheck(doc) {
+async function runCheck(doc: vscodeTypes.TextDocument | undefined): Promise<void> {
   if (!doc || doc.languageId !== "modelica") {
     vscode.window.showErrorMessage("チェックする Modelica ファイルを開いてください。");
     return;
@@ -284,10 +315,7 @@ async function runCheck(doc) {
       unlocated.filter((u) => u.severity === "Error").length;
 
     if (nErr === 0) {
-      vscode.window.setStatusBarMessage(
-        `Modelica: ${className} チェック成功`,
-        5000
-      );
+      vscode.window.setStatusBarMessage(`Modelica: ${className} チェック成功`, 5000);
       if (unlocated.length) {
         vscode.window.showWarningMessage(
           `omc: ${unlocated.map((u) => u.message).join(" / ")}`
@@ -303,7 +331,7 @@ async function runCheck(doc) {
       );
     }
   } catch (e) {
-    vscode.window.showErrorMessage(e.message);
+    vscode.window.showErrorMessage(errorMessage(e));
   }
 }
 
@@ -352,40 +380,61 @@ const LOG_FLAGS = [
 // 既定 ON の Logging（ユーザ要望: STDOUT / ASSERT / STATS）
 const DEFAULT_LOGGING = ["LOG_STDOUT", "LOG_ASSERT", "LOG_STATS"];
 
+/** Simulation Setup の確定値。 */
+interface SimOptions {
+  startTime: number;
+  stopTime: number;
+  intervalMode: "interval" | "numberOfIntervals";
+  numberOfIntervals: number;
+  interval: number;
+  tolerance: number;
+  method: string;
+  outputFormat: string;
+  deleteIntermediates: boolean;
+  logging: string[];
+}
+
 /**
  * Webview から来た生入力を検証・正規化する。
  * 数値は Number 化し、method/outputFormat は許可リストに丸める。
  * .mos スクリプトへ埋め込むため、値の妥当性検証はインジェクション防止も兼ねる。
  */
-function sanitizeOptions(raw) {
-  const r = raw || {};
-  const num = (v, def) => {
+function sanitizeOptions(raw: unknown): SimOptions {
+  const r = (raw || {}) as Record<string, unknown>;
+  const num = (v: unknown, def: number): number => {
     const n = Number(v);
     return Number.isFinite(n) ? n : def;
   };
-  let intervals = parseInt(r.numberOfIntervals, 10);
+  let intervals = parseInt(String(r["numberOfIntervals"]), 10);
   if (!Number.isFinite(intervals) || intervals < 1) intervals = 500;
-  let interval = num(r.interval, 0);
+  let interval = num(r["interval"], 0);
   if (!(interval > 0)) interval = 0;
+  const method = r["method"];
+  const outputFormat = r["outputFormat"];
+  const logging = r["logging"];
   return {
-    startTime: num(r.startTime, 0),
-    stopTime: num(r.stopTime, 1),
-    intervalMode: r.intervalMode === "interval" ? "interval" : "numberOfIntervals",
+    startTime: num(r["startTime"], 0),
+    stopTime: num(r["stopTime"], 1),
+    intervalMode:
+      r["intervalMode"] === "interval" ? "interval" : "numberOfIntervals",
     numberOfIntervals: intervals,
     interval,
-    tolerance: num(r.tolerance, 1e-6),
-    method: SOLVERS.includes(r.method) ? r.method : "dassl",
-    outputFormat: OUTPUT_FORMATS.includes(r.outputFormat) ? r.outputFormat : "mat",
+    tolerance: num(r["tolerance"], 1e-6),
+    method: typeof method === "string" && SOLVERS.includes(method) ? method : "dassl",
+    outputFormat:
+      typeof outputFormat === "string" && OUTPUT_FORMATS.includes(outputFormat)
+        ? outputFormat
+        : "mat",
     deleteIntermediates:
-      r.deleteIntermediates === undefined ? true : !!r.deleteIntermediates,
-    logging: Array.isArray(r.logging)
-      ? r.logging.filter((f) => LOG_FLAGS.includes(f))
+      r["deleteIntermediates"] === undefined ? true : !!r["deleteIntermediates"],
+    logging: Array.isArray(logging)
+      ? logging.filter((f): f is string => typeof f === "string" && LOG_FLAGS.includes(f))
       : DEFAULT_LOGGING.slice(),
   };
 }
 
 /** intervalMode に応じて実際の numberOfIntervals を求める */
-function effectiveIntervals(o) {
+function effectiveIntervals(o: SimOptions): number {
   if (o.intervalMode === "interval" && o.interval > 0) {
     const span = o.stopTime - o.startTime;
     return Math.max(1, Math.round(span / o.interval));
@@ -395,9 +444,9 @@ function effectiveIntervals(o) {
 
 /** ビルドディレクトリの中間生成物を削除し、結果(.mat/.csv)・ログ(.log)・
  *  モデル情報(.mo/.mos)だけ残す */
-function cleanBuildDir(buildDir, resultFile) {
+function cleanBuildDir(buildDir: string, resultFile: string | null): void {
   const keepExt = new Set([".mat", ".csv", ".log", ".mo", ".mos"]);
-  let entries;
+  let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(buildDir, { withFileTypes: true });
   } catch (_) {
@@ -422,7 +471,12 @@ function cleanBuildDir(buildDir, resultFile) {
  * （`redeclare constant` を含む媒体等では saveTotalModel の出力が壊れて再ロードできないため）
  * 非同期・非ブロッキングで呼ぶ。失敗しても致命的でない。
  */
-async function validateTotalModel(buildDir, className, simpleName, omcPath) {
+async function validateTotalModel(
+  buildDir: string,
+  className: string,
+  simpleName: string,
+  omcPath: string
+): Promise<void> {
   const totalPath = path.join(buildDir, `${simpleName}_total.mo`);
   if (!fs.existsSync(totalPath)) return;
   const script = [
@@ -464,7 +518,10 @@ async function validateTotalModel(buildDir, className, simpleName, omcPath) {
 }
 
 /** 指定オプションで実際に simulate を実行する */
-async function runSimulation(doc, rawOptions) {
+async function runSimulation(
+  doc: vscodeTypes.TextDocument | undefined,
+  rawOptions: unknown
+): Promise<void> {
   if (!doc || doc.languageId !== "modelica") {
     vscode.window.showErrorMessage(
       "シミュレーションする Modelica ファイルを開いてください。"
@@ -481,7 +538,7 @@ async function runSimulation(doc, rawOptions) {
   }
   const numberOfIntervals = effectiveIntervals(options);
   const buildDir = ensureBuildDir(filePath, className);
-  const simpleName = className.split(".").pop();
+  const simpleName = className.split(".").pop()!;
 
   // モデル情報の保存（再現・アーカイブ用）:
   //  - <単純名>.mos       … 実行スクリプト（keepScriptPath で保存）
@@ -504,19 +561,22 @@ async function runSimulation(doc, rawOptions) {
   }
 
   // シミュレーション状態を受け取る TCP サーバ（omc の実行ファイルが -port で接続し進捗を送る）
-  let reporter = null;
+  let reporter: vscodeTypes.Progress<{
+    message?: string;
+    increment?: number;
+  }> | null = null;
   let lastPct = 0;
   const server = net.createServer((sock) => {
     let buf = "";
-    sock.on("data", (d) => {
+    sock.on("data", (d: Buffer) => {
       buf += d.toString();
-      let idx;
+      let idx: number;
       while ((idx = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, idx);
         buf = buf.slice(idx + 1);
         const m = /^(\d+)\s/.exec(line); // "<0..10000> <status>"
         if (m && reporter) {
-          const pct = Math.min(100, Math.round(parseInt(m[1], 10) / 100));
+          const pct = Math.min(100, Math.round(parseInt(m[1]!, 10) / 100));
           if (pct > lastPct) {
             reporter.report({ increment: pct - lastPct, message: `${pct}%` });
             lastPct = pct;
@@ -528,11 +588,12 @@ async function runSimulation(doc, rawOptions) {
   });
   let statusPort = 0;
   try {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
+      server.listen(0, "127.0.0.1", () => resolve());
     });
-    statusPort = server.address().port;
+    const addr = server.address();
+    statusPort = addr && typeof addr === "object" ? addr.port : 0;
   } catch (_) {
     statusPort = 0; // ポートが確保できなければ進捗なしで続行
   }
@@ -613,7 +674,7 @@ async function runSimulation(doc, rawOptions) {
       );
     }
   } catch (e) {
-    vscode.window.showErrorMessage(e.message);
+    vscode.window.showErrorMessage(errorMessage(e));
   } finally {
     try {
       server.close();
@@ -623,9 +684,8 @@ async function runSimulation(doc, rawOptions) {
   }
 }
 
-function getNonce() {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+function getNonce(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let text = "";
   for (let i = 0; i < 32; i++) {
     text += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -633,12 +693,16 @@ function getNonce() {
   return text;
 }
 
-function htmlAttr(v) {
+function htmlAttr(v: unknown): string {
   return String(v).replace(/"/g, "&quot;");
 }
 
 /** OMEdit の Simulation Setup 風の Webview HTML を生成する */
-function getSimSetupHtml(webview, className, initial) {
+function getSimSetupHtml(
+  webview: vscodeTypes.Webview,
+  className: string,
+  initial: SimOptions
+): string {
   const nonce = getNonce();
   const solverOptions = SOLVERS.map(
     (s) =>
@@ -764,7 +828,11 @@ function getSimSetupHtml(webview, className, initial) {
 }
 
 /** Simulation Setup の設定をモデルの experiment / simulationFlags annotation に書き戻す */
-async function saveSimSetupToModel(doc, className, rawOptions) {
+async function saveSimSetupToModel(
+  doc: vscodeTypes.TextDocument,
+  className: string,
+  rawOptions: unknown
+): Promise<void> {
   const o = sanitizeOptions(rawOptions);
   const span = o.stopTime - o.startTime;
   const interval =
@@ -789,10 +857,7 @@ async function saveSimSetupToModel(doc, className, rawOptions) {
     return;
   }
   const edit = new vscode.WorkspaceEdit();
-  const full = new vscode.Range(
-    doc.positionAt(0),
-    doc.positionAt(oldText.length)
-  );
+  const full = new vscode.Range(doc.positionAt(0), doc.positionAt(oldText.length));
   edit.replace(doc.uri, full, newText);
   const applied = await vscode.workspace.applyEdit(edit);
   if (applied) {
@@ -806,8 +871,16 @@ async function saveSimSetupToModel(doc, className, rawOptions) {
   }
 }
 
+/** 先に来た「未定義でない値」を返す。最後の値は既定値として必ず定義済みであること。 */
+function pick<T>(...vals: (T | undefined | null)[]): T {
+  for (const v of vals) if (v !== undefined && v !== null) return v;
+  return vals[vals.length - 1] as T;
+}
+
 /** Simulation Setup ダイアログ（Webview）を開き、実行・保存を仲介する */
-async function openSimulationSetup(doc) {
+async function openSimulationSetup(
+  doc: vscodeTypes.TextDocument | undefined
+): Promise<void> {
   if (!doc || doc.languageId !== "modelica") {
     vscode.window.showErrorMessage(
       "シミュレーションする Modelica ファイルを開いてください。"
@@ -821,18 +894,15 @@ async function openSimulationSetup(doc) {
   }
   const cfg = getConfig();
   const stateKey = `modelica.simopts.${className}`;
-  const saved = extContext.workspaceState.get(stateKey, {});
+  const saved = extContext.workspaceState.get<Partial<SimOptions>>(stateKey, {});
   const text = doc.getText();
   const expA = annotations.parseExperiment(text) || {};
   const flagsA = annotations.parseSimulationFlags(text) || {};
   // 優先順位: モデルの annotation > 前回設定(workspaceState) > 既定
-  const pick = (...vals) => {
-    for (const v of vals) if (v !== undefined && v !== null) return v;
-  };
 
-  let intervalMode;
-  let interval;
-  let numberOfIntervals;
+  let intervalMode: SimOptions["intervalMode"];
+  let interval: number;
+  let numberOfIntervals: number;
   if (expA.interval !== undefined) {
     intervalMode = "interval";
     interval = expA.interval;
@@ -844,7 +914,7 @@ async function openSimulationSetup(doc) {
   }
   const annLogging = (flagsA.logging || []).filter((f) => LOG_FLAGS.includes(f));
 
-  const initial = {
+  const initial: SimOptions = {
     startTime: pick(expA.startTime, saved.startTime, 0),
     stopTime: pick(expA.stopTime, saved.stopTime, cfg.stopTime),
     intervalMode,
@@ -854,9 +924,7 @@ async function openSimulationSetup(doc) {
     method: pick(flagsA.method, saved.method, "dassl"),
     outputFormat: pick(saved.outputFormat, "mat"),
     deleteIntermediates: pick(saved.deleteIntermediates, true),
-    logging: annLogging.length
-      ? annLogging
-      : pick(saved.logging, DEFAULT_LOGGING),
+    logging: annLogging.length ? annLogging : pick(saved.logging, DEFAULT_LOGGING),
   };
 
   const panel = vscode.window.createWebviewPanel(
@@ -867,7 +935,7 @@ async function openSimulationSetup(doc) {
   );
   panel.webview.html = getSimSetupHtml(panel.webview, className, initial);
   panel.webview.onDidReceiveMessage(
-    async (msg) => {
+    async (msg: { command?: string; values?: unknown } | undefined) => {
       if (!msg) return;
       if (msg.command === "simulate") {
         const opts = sanitizeOptions(msg.values);
@@ -891,12 +959,33 @@ async function openSimulationSetup(doc) {
 // ① 継承もと・変数宣言へのジャンプ（go-to-definition）
 // =====================================================================
 
-let rootMapCache = null;
+let rootMapCache: RootMap | null = null;
 
-/** ワークスペースのライブラリルート {ルートパッケージ名: ディレクトリ} を構築（キャッシュ）。 */
-async function getRootMap() {
+// 単一ファイルのルートを探す深さ（ワークスペースフォルダから 3 階層まで）。
+// 構造化ライブラリ配下は除外するので、これ以上深く掘っても実りが少なく走査だけ重くなる。
+const LOOSE_MO_GLOB = "{*.mo,*/*.mo,*/*/*.mo}";
+
+/** dir か その祖先が package.mo を持つディレクトリ（= 構造化ライブラリの一部）か。 */
+function isInsidePackageDir(dir: string, pkgDirs: Set<string>): boolean {
+  let cur = dir;
+  for (;;) {
+    if (pkgDirs.has(cur)) return true;
+    const parent = path.dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
+}
+
+/**
+ * ワークスペースのライブラリルート {ルートパッケージ名: パス} を構築（キャッシュ）。
+ * 値は package.mo を持つディレクトリ、または package.mo に属さない単一ファイル（.mo）。
+ * 後者により、ワークスペースのルートに package.mo が無くても（単一ファイルライブラリや
+ * ばら置きのモデルでも）ツリーに出る。
+ */
+async function getRootMap(): Promise<RootMap> {
   if (rootMapCache) return rootMapCache;
-  const map = {};
+  const map: RootMap = {};
+  const pkgDirs = new Set<string>();
   try {
     const uris = await vscode.workspace.findFiles(
       "**/package.mo",
@@ -904,10 +993,10 @@ async function getRootMap() {
       5000
     );
     const files = uris.map((u) => u.fsPath);
-    const dirSet = new Set(files.map((f) => path.dirname(f)));
+    for (const f of files) pkgDirs.add(path.dirname(f));
     for (const f of files) {
       const d = path.dirname(f);
-      if (dirSet.has(path.dirname(d))) continue; // 親も package → ルートでない
+      if (pkgDirs.has(path.dirname(d))) continue; // 親も package → ルートでない
       try {
         const name = symbols.readPrimaryClassName(fs.readFileSync(f, "utf8"));
         if (name && !(name in map)) map[name] = d;
@@ -918,6 +1007,31 @@ async function getRootMap() {
   } catch (_) {
     /* ignore */
   }
+
+  // 構造化ライブラリに属さない .mo は、それ自体が最上位クラス（Modelica 的に単一ファイル格納）。
+  try {
+    const uris = await vscode.workspace.findFiles(
+      LOOSE_MO_GLOB,
+      "**/node_modules/**",
+      2000
+    );
+    for (const u of uris) {
+      const f = u.fsPath;
+      if (path.basename(f).toLowerCase() === "package.mo") continue;
+      if (isInsidePackageDir(path.dirname(f), pkgDirs)) continue;
+      try {
+        const name =
+          symbols.readPrimaryClassName(fs.readFileSync(f, "utf8")) ||
+          path.basename(f, path.extname(f));
+        if (util.isValidIdent(name) && !(name in map)) map[name] = f;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+
   rootMapCache = map;
   return map;
 }
@@ -927,27 +1041,33 @@ async function getRootMap() {
  * ツリー項目（qname を持つ）→ その定義ファイル、エディタタイトル等の Uri → そのファイル、
  * 引数なし → アクティブエディタ。見つからなければ null（呼び出し側でメッセージを出す）。
  */
-async function documentForCommand(arg) {
-  if (arg && typeof arg === "object" && typeof arg.qname === "string") {
-    const rootMap = await getRootMap();
-    const loc = symbols.resolveClass(arg.qname, rootMap);
-    if (!loc || !loc.file) return null;
-    return vscode.workspace.openTextDocument(loc.file);
-  }
-  if (arg && arg.scheme === "file" && arg.fsPath) {
-    return vscode.workspace.openTextDocument(arg);
+async function documentForCommand(
+  arg: unknown
+): Promise<vscodeTypes.TextDocument | null> {
+  if (arg && typeof arg === "object") {
+    const node = arg as { qname?: unknown };
+    if (typeof node.qname === "string") {
+      const rootMap = await getRootMap();
+      const loc = symbols.resolveClass(node.qname, rootMap);
+      if (!loc || !loc.file) return null;
+      return await vscode.workspace.openTextDocument(loc.file);
+    }
+    const uri = arg as vscodeTypes.Uri;
+    if (uri.scheme === "file" && uri.fsPath) {
+      return await vscode.workspace.openTextDocument(uri);
+    }
   }
   const ed = vscode.window.activeTextEditor;
   return ed ? ed.document : null;
 }
 
-const definitionProvider = {
+const definitionProvider: vscodeTypes.DefinitionProvider = {
   async provideDefinition(document, position) {
     const text = document.getText();
     const offset = document.offsetAt(position);
     const dn = symbols.dottedNameAt(text, offset);
     if (!dn || !dn.name) return null;
-    const toLoc = (uri, line, character) =>
+    const toLoc = (uri: vscodeTypes.Uri, line: number, character: number) =>
       new vscode.Location(uri, new vscode.Position(line, character));
 
     const isDotted = dn.name.includes(".");
@@ -968,12 +1088,11 @@ const definitionProvider = {
       const q = util.qualifiedName(path.dirname(document.uri.fsPath));
       if (q) cls = symbols.resolveClass(q + "." + dn.name, rootMap);
     }
-    if (cls)
-      return toLoc(vscode.Uri.file(cls.file), cls.line, cls.character);
+    if (cls) return toLoc(vscode.Uri.file(cls.file), cls.line, cls.character);
 
     // 4) ドット名でクラス未解決（例: component.field）→ 先頭セグメントのローカル宣言
     if (isDotted) {
-      const first = dn.name.split(".")[0];
+      const first = dn.name.split(".")[0]!;
       const loc = symbols.findLocalDeclaration(text, first);
       if (loc) return toLoc(document.uri, loc.line, loc.character);
     }
@@ -999,23 +1118,20 @@ const MODELICA_KEYWORDS = [
 const BUILTIN_TYPES = ["Real", "Integer", "Boolean", "String"];
 
 /** name→CompletionItem（クラス/パッケージ）。 */
-function classItem(name, kind) {
+function classItem(name: string, kind: string): vscodeTypes.CompletionItem {
   const K = vscode.CompletionItemKind;
-  return new vscode.CompletionItem(
-    name,
-    kind === "package" ? K.Module : K.Class
-  );
+  return new vscode.CompletionItem(name, kind === "package" ? K.Module : K.Class);
 }
 
-const completionProvider = {
+const completionProvider: vscodeTypes.CompletionItemProvider = {
   async provideCompletionItems(document, position) {
     const linePrefix = document
       .lineAt(position.line)
       .text.slice(0, position.character);
     const m = /([A-Za-z_][\w.]*)$/.exec(linePrefix);
-    const token = m ? m[1] : "";
+    const token = m ? m[1]! : "";
     const rootMap = await getRootMap();
-    const items = [];
+    const items: vscodeTypes.CompletionItem[] = [];
 
     if (token.includes(".")) {
       const qualifier = token.slice(0, token.lastIndexOf("."));
@@ -1038,7 +1154,7 @@ const completionProvider = {
           if (!cls && dirQ)
             cls = symbols.resolveClass(dirQ + "." + comp.type, rootMap);
           if (cls && cls.file) {
-            const clsName = comp.type.split(".").pop();
+            const clsName = comp.type.split(".").pop()!;
             for (const mem of symbols.listClassMembers(
               cls.file,
               clsName,
@@ -1064,10 +1180,7 @@ const completionProvider = {
     for (const t of BUILTIN_TYPES)
       items.push(new vscode.CompletionItem(t, vscode.CompletionItemKind.Class));
     for (const c of symbols.parseComponents(document.getText())) {
-      const it = new vscode.CompletionItem(
-        c.name,
-        vscode.CompletionItemKind.Field
-      );
+      const it = new vscode.CompletionItem(c.name, vscode.CompletionItemKind.Field);
       it.detail = c.type;
       items.push(it);
     }
@@ -1090,25 +1203,36 @@ const completionProvider = {
 
 const WORD_RE = /[A-Za-z_]\w*/;
 
+/** 位置のワード情報。 */
+interface WordContext {
+  range: vscodeTypes.Range;
+  name: string;
+  isMember: boolean;
+  text: string;
+}
+
 /** 位置のワード範囲・名前・直前が '.'（メンバー参照）か を返す。 */
-function wordContext(document, position) {
+function wordContext(
+  document: vscodeTypes.TextDocument,
+  position: vscodeTypes.Position
+): WordContext | null {
   const range = document.getWordRangeAtPosition(position, WORD_RE);
   if (!range) return null;
   const name = document.getText(range);
   const offset = document.offsetAt(range.start);
   const text = document.getText();
   let p = offset - 1;
-  while (p >= 0 && /\s/.test(text[p])) p--;
-  const isMember = p >= 0 && text[p] === ".";
+  while (p >= 0 && /\s/.test(text.charAt(p))) p--;
+  const isMember = p >= 0 && text.charAt(p) === ".";
   return { range, name, isMember, text };
 }
 
 /** name が現在ファイルのローカル宣言（変数/コンポーネント）か。 */
-function isLocalComponent(text, name) {
+function isLocalComponent(text: string, name: string): boolean {
   return symbols.parseComponents(text).some((c) => c.name === name);
 }
 
-const renameProvider = {
+const renameProvider: vscodeTypes.RenameProvider = {
   prepareRename(document, position) {
     const wc = wordContext(document, position);
     if (!wc) throw new Error("リネームできる識別子がありません。");
@@ -1126,12 +1250,9 @@ const renameProvider = {
   provideRenameEdits(document, position, newName) {
     const wc = wordContext(document, position);
     if (!wc) throw new Error("リネームできる識別子がありません。");
-    if (wc.isMember)
-      throw new Error("他オブジェクトのメンバーはリネームできません。");
+    if (wc.isMember) throw new Error("他オブジェクトのメンバーはリネームできません。");
     if (!util.isValidIdent(newName))
-      throw new Error(
-        "無効な Modelica 識別子です（英字か _ で始まり、英数字か _ のみ）。"
-      );
+      throw new Error("無効な Modelica 識別子です（英字か _ で始まり、英数字か _ のみ）。");
     if (!isLocalComponent(wc.text, wc.name))
       throw new Error("リネーム対象は変数・コンポーネント名のみ対応です。");
     if (newName === wc.name) return new vscode.WorkspaceEdit();
@@ -1147,10 +1268,7 @@ const renameProvider = {
       if (o.start < lo || o.end > hi) continue;
       edit.replace(
         document.uri,
-        new vscode.Range(
-          document.positionAt(o.start),
-          document.positionAt(o.end)
-        ),
+        new vscode.Range(document.positionAt(o.start), document.positionAt(o.end)),
         newName
       );
     }
@@ -1163,11 +1281,12 @@ const renameProvider = {
 // =====================================================================
 
 /** Documentation の HTML をテーマ対応の Webview 文書に包む。 */
-function getDocHtml(webview, className, docHtml) {
-  const nonce = getNonce();
-  const inner = docHtml
-    .replace(/^\s*<html>/i, "")
-    .replace(/<\/html>\s*$/i, "");
+function getDocHtml(
+  webview: vscodeTypes.Webview,
+  className: string,
+  docHtml: string
+): string {
+  const inner = docHtml.replace(/^\s*<html>/i, "").replace(/<\/html>\s*$/i, "");
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -1195,7 +1314,9 @@ function getDocHtml(webview, className, docHtml) {
 </html>`;
 }
 
-async function showDocumentation(doc) {
+async function showDocumentation(
+  doc: vscodeTypes.TextDocument | null
+): Promise<void> {
   if (!doc || doc.languageId !== "modelica") {
     vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
     return;
@@ -1228,7 +1349,11 @@ async function showDocumentation(doc) {
 // Diagram View（Webview・SVG）
 // =====================================================================
 
-function getDiagramHtml(webview, className, svg) {
+function getDiagramHtml(
+  webview: vscodeTypes.Webview,
+  className: string,
+  svg: string
+): string {
   const nonce = getNonce();
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -1293,11 +1418,16 @@ function getDiagramHtml(webview, className, svg) {
  * 基底クラスの graphics を先（下）に、派生クラスを後（上）に積む。
  * 返り値 {coord, graphics}。graphics が空なら Icon 無し。
  */
-function collectIconFromFile(file, simpleName, rootMap, seen) {
+function collectIconFromFile(
+  file: string,
+  simpleName: string,
+  rootMap: RootMap,
+  seen: Set<string>
+): IconDef {
   const key = file + "::" + simpleName;
   if (seen.has(key)) return { coord: null, graphics: [] };
   seen.add(key);
-  let text;
+  let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
   } catch (_) {
@@ -1305,7 +1435,7 @@ function collectIconFromFile(file, simpleName, rootMap, seen) {
   }
   const body = symbols.extractClassBody(text, simpleName) || text;
   const dir = path.dirname(file);
-  const merged = { coord: null, graphics: [] };
+  const merged: IconDef = { coord: null, graphics: [] };
   for (const base of graphics.parseExtends(body)) {
     let bcls = symbols.resolveClass(base, rootMap);
     if (!bcls) {
@@ -1315,7 +1445,7 @@ function collectIconFromFile(file, simpleName, rootMap, seen) {
     if (bcls && bcls.file) {
       const bi = collectIconFromFile(
         bcls.file,
-        base.split(".").pop(),
+        base.split(".").pop()!,
         rootMap,
         seen
       );
@@ -1331,7 +1461,7 @@ function collectIconFromFile(file, simpleName, rootMap, seen) {
   return merged;
 }
 
-async function showDiagram(doc) {
+async function showDiagram(doc: vscodeTypes.TextDocument | null): Promise<void> {
   if (!doc || doc.languageId !== "modelica") {
     vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
     return;
@@ -1352,22 +1482,25 @@ async function showDiagram(doc) {
   // 各コンポーネント型の Icon 図形（extends 継承込み）を解決・キャッシュ
   const rootMap = await getRootMap();
   const dirQ = util.qualifiedName(path.dirname(doc.uri.fsPath));
-  const iconCache = new Map();
-  const iconForType = (type) => {
-    if (iconCache.has(type)) return iconCache.get(type);
-    let icon = null;
+  const iconCache = new Map<string, IconDef | null>();
+  const iconForType = (type: string): IconDef | null => {
+    const cached = iconCache.get(type);
+    if (cached !== undefined) return cached;
+    let icon: IconDef | null = null;
     let cls = symbols.resolveClass(type, rootMap);
     if (!cls && dirQ) cls = symbols.resolveClass(dirQ + "." + type, rootMap);
     if (cls && cls.file) {
       const merged = collectIconFromFile(
         cls.file,
-        type.split(".").pop(),
+        type.split(".").pop()!,
         rootMap,
-        new Set()
+        new Set<string>()
       );
       if (merged.graphics.length) {
-        if (!merged.coord)
-          merged.coord = { xmin: -100, ymin: -100, xmax: 100, ymax: 100 };
+        if (!merged.coord) {
+          const def: CoordExtent = { xmin: -100, ymin: -100, xmax: 100, ymax: 100 };
+          merged.coord = def;
+        }
         icon = merged;
       }
     }
@@ -1375,7 +1508,7 @@ async function showDiagram(doc) {
     return icon;
   };
 
-  const renderComponent = (c) => {
+  const renderComponent = (c: Placement): string | null => {
     const icon = iconForType(c.type);
     if (!icon) return null; // 名前付きボックスにフォールバック
     const [[e1x, e1y], [e2x, e2y]] = c.extent;
@@ -1389,7 +1522,7 @@ async function showDiagram(doc) {
       ylo: Math.min(y1, y2),
       yhi: Math.max(y1, y2),
     };
-    const tf = (x, y) => [x, -y]; // Modelica 図面座標 → SVG（Y 反転）
+    const tf = (x: number, y: number): Point => [x, -y]; // Modelica 図面座標 → SVG（Y 反転）
     const frag = graphics.renderIcon(icon, box, tf, { name: c.name });
     if (!frag) return null;
     const rot =
@@ -1432,7 +1565,7 @@ async function showDiagram(doc) {
 // annotation 非表示（折りたたみトグル）
 // =====================================================================
 
-const foldingRangeProvider = {
+const foldingRangeProvider: vscodeTypes.FoldingRangeProvider = {
   provideFoldingRanges(document) {
     return annotations
       .findAnnotationRanges(document.getText())
@@ -1447,7 +1580,7 @@ const foldingRangeProvider = {
   },
 };
 
-async function toggleAnnotations() {
+async function toggleAnnotations(): Promise<void> {
   const ed = vscode.window.activeTextEditor;
   if (!ed || ed.document.languageId !== "modelica") {
     vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
@@ -1484,9 +1617,9 @@ async function toggleAnnotations() {
 // activate / deactivate
 // =====================================================================
 
-function activate(context) {
+export function activate(context: vscodeTypes.ExtensionContext): void {
   extContext = context;
-  const createCommands = {
+  const createCommands: Record<string, EntityKind> = {
     "modelica.newModel": "model",
     "modelica.newBlock": "block",
     "modelica.newRecord": "record",
@@ -1497,7 +1630,9 @@ function activate(context) {
   };
   for (const [command, kind] of Object.entries(createCommands)) {
     context.subscriptions.push(
-      vscode.commands.registerCommand(command, (uri) => createEntity(kind, uri))
+      vscode.commands.registerCommand(command, (uri?: vscodeTypes.Uri) =>
+        createEntity(kind, uri)
+      )
     );
   }
 
@@ -1522,10 +1657,7 @@ function activate(context) {
   );
   // ③ リネーム
   context.subscriptions.push(
-    vscode.languages.registerRenameProvider(
-      { language: "modelica" },
-      renameProvider
-    )
+    vscode.languages.registerRenameProvider({ language: "modelica" }, renameProvider)
   );
   // Documentation 表示 / annotation 折りたたみ
   context.subscriptions.push(
@@ -1556,8 +1688,10 @@ function activate(context) {
       rootMapCache = null;
       treeProvider.refresh();
     }),
-    vscode.commands.registerCommand("modelica.packageTree.open", async (node) =>
-      modelicaTree.openNode(node, await getRootMap())
+    vscode.commands.registerCommand(
+      "modelica.packageTree.open",
+      async (node: modelicaTree.ModelicaTreeNode) =>
+        modelicaTree.openNode(node, await getRootMap())
     )
   );
 
@@ -1571,12 +1705,12 @@ function activate(context) {
   pkgWatcher.onDidDelete(invalidateRootMap);
   context.subscriptions.push(pkgWatcher);
 
-  // .mo の増減・編集（ファイル内ネストクラスの増減）でツリーを更新
+  // .mo の増減・編集（ファイル内ネストクラスの増減）でツリーを更新。
+  // 増減は単一ファイルのルートも変えるためルート表ごと無効化する。
   const moWatcher = vscode.workspace.createFileSystemWatcher("**/*.mo");
-  const refreshTree = () => treeProvider.refreshSoon();
-  moWatcher.onDidCreate(refreshTree);
-  moWatcher.onDidDelete(refreshTree);
-  moWatcher.onDidChange(refreshTree);
+  moWatcher.onDidCreate(invalidateRootMap);
+  moWatcher.onDidDelete(invalidateRootMap);
+  moWatcher.onDidChange(() => treeProvider.refreshSoon());
   context.subscriptions.push(moWatcher);
 
   context.subscriptions.push(
@@ -1585,12 +1719,10 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("modelica.check", () =>
-      runCheck(vscode.window.activeTextEditor && vscode.window.activeTextEditor.document)
+      runCheck(vscode.window.activeTextEditor?.document)
     ),
     vscode.commands.registerCommand("modelica.simulate", () =>
-      openSimulationSetup(
-        vscode.window.activeTextEditor && vscode.window.activeTextEditor.document
-      )
+      openSimulationSetup(vscode.window.activeTextEditor?.document)
     )
   );
 
@@ -1603,12 +1735,10 @@ function activate(context) {
   );
 }
 
-function deactivate() {}
-
-module.exports = { activate, deactivate };
+export function deactivate(): void {}
 
 // 単体検証用に内部の純粋関数を公開
-module.exports._internal = {
+export const _internal = {
   isValidIdent,
   qualifiedName,
   renderTemplate,
