@@ -3,14 +3,17 @@
 
   "permissions": {
       "deny": [
-        "Edit(/ref/**)"
+        "Edit(/lib/**)"
       ],
       
       "allow": [
+        "Edit(/modelica/EAST/Icons/**)",
         "Bash(git *)",
         "Bash(npm *)",
         "Bash(python *)",
         "Bash(cd *)",
+        "Bash(tail *)",
+        "Bash(head *)",
         "Bash(build *)"
       ]
     }
