@@ -2,7 +2,7 @@
   "name": "modelica-vscode",
   "displayName": "Modelica Language",
   "description": "Modelica 言語のシンタックスハイライトと言語サポート（EAST ライブラリ開発用）",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "publisher": "east",
   "license": "MIT",
   "engines": {
@@ -20,6 +20,29 @@
   "main": "./src/extension.js",
   "activationEvents": [],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "modelica",
+          "title": "Modelica",
+          "icon": "resources/modelica.svg"
+        }
+      ]
+    },
+    "views": {
+      "modelica": [
+        {
+          "id": "modelica.packageTree",
+          "name": "Modelica Packages"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "modelica.packageTree",
+        "contents": "ワークスペースに Modelica パッケージ（package.mo）が見つかりません。\nライブラリのフォルダを開くか、フォルダを右クリックして「Modelica 新規作成」→「パッケージ」で作成してください。\n[再読み込み](command:modelica.packageTree.refresh)"
+      }
+    ],
     "languages": [
       {
         "id": "modelica",
@@ -130,6 +153,18 @@
         "title": "ダイアグラムを表示",
         "category": "Modelica",
         "icon": "$(circuit-board)"
+      },
+      {
+        "command": "modelica.packageTree.refresh",
+        "title": "パッケージツリーを再読み込み",
+        "category": "Modelica",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "modelica.packageTree.open",
+        "title": "定義を開く",
+        "category": "Modelica",
+        "icon": "$(go-to-file)"
       }
     ],
     "submenus": [
@@ -215,6 +250,30 @@
           "group": "navigation@5"
         }
       ],
+      "view/title": [
+        {
+          "command": "modelica.packageTree.refresh",
+          "when": "view == modelica.packageTree",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "modelica.packageTree.open",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\./",
+          "group": "navigation@1"
+        },
+        {
+          "command": "modelica.showDocumentation",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\.(package|class)/",
+          "group": "modelica@2"
+        },
+        {
+          "command": "modelica.showDiagram",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\.class/",
+          "group": "modelica@3"
+        }
+      ],
       "commandPalette": [
         {
           "command": "modelica.check",
@@ -235,6 +294,10 @@
         {
           "command": "modelica.showDiagram",
           "when": "resourceLangId == modelica"
+        },
+        {
+          "command": "modelica.packageTree.open",
+          "when": "false"
         }
       ]
     }

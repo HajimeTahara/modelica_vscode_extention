@@ -50,12 +50,19 @@
 - **ダイアグラム表示**（🔲・v0.11.0〜）— `src/graphics.js`＋`modelicaGraphics/` で Placement / connect Line /
   Diagram を解析し SVG 描画。v0.13.0 でパン/ズーム、v0.14.0 で実 Icon 図形描画（extends を辿り基底クラスの
   Icon を収集、%name 置換、Placement へ配置、Icon 無しはボックスにフォールバック）。
+- **パッケージツリー表示**（v0.15.0）— Activity Bar の Modelica タブに `Modelica Packages` ツリー。
+  `src/modelicaTree.js` を vscode 依存の UI 層とし、子の列挙・定義解決は既存の `src/symbols.js`
+  （`listPackageChildren` / `resolveContainer` / `resolveClass`）を再利用する（omc 不要）。
+  展開時にのみ子を列挙（遅延展開）し、`.mo` / `package.mo` の監視でまとめて refresh する。
 
 ### 既知の保留改善
 
 - go-to-definition の外部ライブラリ対応（`modelica.libraryPaths`）、非クラスメンバー着地、存在しない名前の厳格化。
 - ダイアグラム描画の制限: mirror 未対応・`%param` 未置換・fillPattern は Solid/None のみ・Bitmap 非対応。
 - クラス名の横断リネームは未対応（リスク高・要相談）。
+- パッケージツリーの制限: 表示順は名前順（`package.order` 未対応）、種別は package / class の 2 種のみ
+  （model / block / record… でアイコンを分けるには `symbols.js` にクラスキーワード取得 API が要る）、
+  アクティブエディタに対応する項目の reveal・ワークスペース外ライブラリ表示は未実装。
 
 ## 同梱ライブラリ modelicaGraphics
 

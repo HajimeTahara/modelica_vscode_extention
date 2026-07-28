@@ -20,6 +20,7 @@ const omc = require("./omc");
 const annotations = require("./annotations");
 const symbols = require("./symbols");
 const graphics = require("./graphics");
+const modelicaTree = require("./modelicaTree");
 
 const { isValidIdent, qualifiedName, findLibraryRoot, classNameForFile } = util;
 
@@ -921,6 +922,25 @@ async function getRootMap() {
   return map;
 }
 
+/**
+ * コマンド引数から対象ドキュメントを求める。
+ * ツリー項目（qname を持つ）→ その定義ファイル、エディタタイトル等の Uri → そのファイル、
+ * 引数なし → アクティブエディタ。見つからなければ null（呼び出し側でメッセージを出す）。
+ */
+async function documentForCommand(arg) {
+  if (arg && typeof arg === "object" && typeof arg.qname === "string") {
+    const rootMap = await getRootMap();
+    const loc = symbols.resolveClass(arg.qname, rootMap);
+    if (!loc || !loc.file) return null;
+    return vscode.workspace.openTextDocument(loc.file);
+  }
+  if (arg && arg.scheme === "file" && arg.fsPath) {
+    return vscode.workspace.openTextDocument(arg);
+  }
+  const ed = vscode.window.activeTextEditor;
+  return ed ? ed.document : null;
+}
+
 const definitionProvider = {
   async provideDefinition(document, position) {
     const text = document.getText();
@@ -1513,30 +1533,55 @@ function activate(context) {
       { language: "modelica" },
       foldingRangeProvider
     ),
-    vscode.commands.registerCommand("modelica.showDocumentation", () =>
-      showDocumentation(
-        vscode.window.activeTextEditor &&
-          vscode.window.activeTextEditor.document
-      )
+    vscode.commands.registerCommand("modelica.showDocumentation", async (arg) =>
+      showDocumentation(await documentForCommand(arg))
     ),
     vscode.commands.registerCommand("modelica.toggleAnnotations", () =>
       toggleAnnotations()
     ),
-    vscode.commands.registerCommand("modelica.showDiagram", () =>
-      showDiagram(
-        vscode.window.activeTextEditor &&
-          vscode.window.activeTextEditor.document
-      )
+    vscode.commands.registerCommand("modelica.showDiagram", async (arg) =>
+      showDiagram(await documentForCommand(arg))
     )
   );
-  // package.mo の増減でライブラリルート表を無効化
+
+  // Modelica Packages ツリー（Activity Bar）
+  const treeProvider = new modelicaTree.ModelicaTreeProvider(getRootMap);
+  context.subscriptions.push(
+    treeProvider,
+    vscode.window.createTreeView("modelica.packageTree", {
+      treeDataProvider: treeProvider,
+      showCollapseAll: true,
+    }),
+    vscode.commands.registerCommand("modelica.packageTree.refresh", () => {
+      rootMapCache = null;
+      treeProvider.refresh();
+    }),
+    vscode.commands.registerCommand("modelica.packageTree.open", async (node) =>
+      modelicaTree.openNode(node, await getRootMap())
+    )
+  );
+
+  // package.mo の増減でライブラリルート表を無効化（ツリーの refresh とは別物）
   const pkgWatcher = vscode.workspace.createFileSystemWatcher("**/package.mo");
   const invalidateRootMap = () => {
     rootMapCache = null;
+    treeProvider.refreshSoon();
   };
   pkgWatcher.onDidCreate(invalidateRootMap);
   pkgWatcher.onDidDelete(invalidateRootMap);
   context.subscriptions.push(pkgWatcher);
+
+  // .mo の増減・編集（ファイル内ネストクラスの増減）でツリーを更新
+  const moWatcher = vscode.workspace.createFileSystemWatcher("**/*.mo");
+  const refreshTree = () => treeProvider.refreshSoon();
+  moWatcher.onDidCreate(refreshTree);
+  moWatcher.onDidDelete(refreshTree);
+  moWatcher.onDidChange(refreshTree);
+  context.subscriptions.push(moWatcher);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(invalidateRootMap)
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("modelica.check", () =>

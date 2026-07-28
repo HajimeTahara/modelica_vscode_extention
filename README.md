@@ -28,6 +28,7 @@ install.bat --uninstall  REM アンインストール
 | 機能 | 起動方法 | OpenModelica |
 |---|---|---|
 | シンタックスハイライト | `.mo` を開くと自動 | 不要 |
+| パッケージツリー表示 | Activity Bar の Modelica タブ | 不要 |
 | 新規ファイル/パッケージ作成 | フォルダ右クリック →「Modelica 新規作成」 | 不要 |
 | 定義へのジャンプ | `F12` / `Ctrl`+クリック | 不要 |
 | 入力予測（補完） | `.` 入力 / `Ctrl`+`Space` | 不要 |
@@ -44,6 +45,21 @@ install.bat --uninstall  REM アンインストール
 
 クラス定義・型・キーワード・演算子・数値・文字列・コメントを色分けする。あわせて括弧の
 自動補完、`//` `/* */` コメント切替、インデント補助、単語境界（言語設定）も提供する。
+
+## パッケージツリー表示
+
+Activity Bar（左端の縦帯）の **Modelica タブ**を開くと、**Modelica Packages** ツリーが表示される。
+エクスプローラーと違い、ファイル/フォルダではなく **Modelica の名前空間**でライブラリを辿れる。
+
+- ルートはワークスペース内ライブラリのルートパッケージ。名前は `package.mo` の宣言から取るため、
+  フォルダ名と違っていてもよい（フォルダ `ModelicaStandardLibrary` → 表示は `Modelica`）。
+- 展開すると `Modelica.Blocks.Sources.Sine` のようにパッケージ／クラスを辿れる。
+  展開したときにだけ中身を読むため、MSL のような大きなライブラリでも初期表示は重くならない。
+- 項目をクリックすると定義ファイルを開く。1 ファイルに複数クラスがある場合は**定義行へジャンプ**する。
+- 右クリックから「定義を開く」「Documentation を表示」「ダイアグラムを表示」を実行できる
+  （エディタで開いていないクラスにも使える）。
+- `.mo` の追加・削除・編集に追従して自動更新する。手動更新はビュー右上の 🔄。
+- 並び順はアルファベット順（`package.order` の順序は未対応）。OpenModelica は不要。
 
 ## 新規ファイル/パッケージ作成
 
@@ -233,6 +249,7 @@ C:\Program Files\OpenModelica<バージョン>-64bit\bin
 | ② | 入力予測 | 自前シンボル解決を再利用 | ✅ |
 | ③ | 変数・オブジェクト名の一括変換 | 自前の参照探索 | ✅ |
 | Want | ダイアグラムビュー | Webview（SVG・模式表示） | ✅ |
+| Want | パッケージツリー表示 | Activity Bar + TreeDataProvider | ✅ |
 
 保留中の改善候補: ワークスペース外ライブラリのジャンプ対応（`modelica.libraryPaths`）、
 非クラスメンバー（定数）への定義行着地、`import` 別名/継承相対名の解決、クラス名の横断リネーム。
@@ -252,7 +269,10 @@ modelica_vscode_extention/
 │   ├── omc.js                       # omc 連携（.mos 生成・実行・出力パース）
 │   ├── annotations.js               # annotation の読み書き（experiment/Documentation/範囲抽出）
 │   ├── symbols.js                   # シンボル解決（ジャンプ/補完/リネームの基盤・vscode 非依存）
+│   ├── modelicaTree.js              # Modelica Packages ツリー（TreeDataProvider・UI 層）
 │   └── graphics.js                  # modelicaGraphics への薄いアダプタ
+├── resources/
+│   └── modelica.svg                 # Activity Bar 用アイコン（単色 SVG）
 ├── syntaxes/
 │   └── modelica.tmLanguage.json     # TextMate 文法（ハイライト定義）
 └── modelicaGraphics/                # 同梱: グラフィック解析/SVG 描画ライブラリ（vscode 非依存）

@@ -289,7 +289,11 @@ function resolveContainer(qname, rootMap) {
       cur = asDir;
       continue;
     }
-    if (fs.existsSync(asFile)) return { type: "file", path: asFile };
+    if (fs.existsSync(asFile)) {
+      // 残りセグメントがある = ファイル内ネストクラス。その下は辿れないので null。
+      // （ここで file を返すと A.B.Nested がファイル A.B の中身を指してしまう）
+      return i === segs.length - 1 ? { type: "file", path: asFile } : null;
+    }
     return null;
   }
   return { type: "dir", path: cur };
