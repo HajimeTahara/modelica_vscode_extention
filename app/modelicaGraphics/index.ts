@@ -71,10 +71,13 @@ export {
   renderPrimitive,
   renderComponentIcon,
   buildDiagramSvg,
+  buildIconSvg,
 } from "./src/render";
 export type {
   FlipSigns,
   IconMap,
+  IconNode,
+  IconSvgOptions,
   NodeIcon,
   DiagramSvgOptions,
   DiagramSvgResult,

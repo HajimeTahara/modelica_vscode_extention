@@ -22,6 +22,7 @@ import type {
   DiagramSvgResult,
   GraphicsLayer,
   IconMap,
+  IconNode,
   NodeIcon,
 } from "./graphics";
 
@@ -219,6 +220,7 @@ let output!: vscodeTypes.OutputChannel;
 let extContext!: vscodeTypes.ExtensionContext; // workspaceState 用
 let docPanel: vscodeTypes.WebviewPanel | undefined; // Documentation 表示の Webview（使い回し）
 let diagramPanel: vscodeTypes.WebviewPanel | undefined; // Diagram View の Webview（使い回し）
+let iconPanel: vscodeTypes.WebviewPanel | undefined; // Icon View の Webview（使い回し）
 let packageTreeView: vscodeTypes.TreeView<modelicaTree.ModelicaTreeNode> | undefined;
 const annotationsHidden = new Set<string>(); // annotation を折りたたみ中のドキュメント URI
 
@@ -1521,19 +1523,22 @@ async function showDocumentation(target: ClassTarget | null): Promise<void> {
 }
 
 // =====================================================================
-// Diagram View（Webview・SVG）
+// Diagram View / Icon View（Webview・SVG）
 // =====================================================================
 
 /**
- * ダイアグラム Webview の HTML。パン/ズームは（CSS 変形ではなく）viewBox の
- * 書き換えで行う。SVG 側の線幅は vector-effect="non-scaling-stroke" なので、
- * こうすると拡大しても線が太らず、目盛りも常に一定の見かけで描ける。
+ * 図形ビュー（ダイアグラム／アイコン）の Webview HTML。パン/ズームは
+ * （CSS 変形ではなく）viewBox の書き換えで行う。SVG 側の線幅は
+ * vector-effect="non-scaling-stroke" なので、こうすると拡大しても線が太らず、
+ * 目盛りも常に一定の見かけで描ける。
  *
- * 配色は Orbis のダイアグラムビューに合わせる（キャンバスは白・外側は淡い青）。
+ * 配色は Orbis のグラフィックスビューに合わせる（キャンバスは白・外側は淡い青）。
  * Modelica のアイコンは白背景前提で色が付いているため、VS Code のテーマ色は敷かない
  * （黒い線画が沈む）。クラス名は Webview パネルのタイトルに出るので本文には置かない。
+ *
+ * diagram には buildDiagramSvg / buildIconSvg の戻り値をそのまま渡せる。
  */
-function getDiagramHtml(
+function getGraphicsHtml(
   webview: vscodeTypes.Webview,
   diagram: DiagramSvgResult
 ): string {
@@ -1796,8 +1801,74 @@ async function showDiagram(target: ClassTarget | null): Promise<void> {
     });
   }
   diagramPanel.title = `Diagram: ${className || ""}`.trim();
-  diagramPanel.webview.html = getDiagramHtml(diagramPanel.webview, diagram);
+  diagramPanel.webview.html = getGraphicsHtml(diagramPanel.webview, diagram);
   diagramPanel.reveal(vscode.ViewColumn.Beside, true);
+}
+
+/**
+ * アイコンビュー。対象クラスの Icon を、extends 継承分を下に敷いた合成レイヤと、
+ * アイコン上に配置されたコネクタ（継承分も含む）で描く。表示専用。
+ */
+async function showIcon(target: ClassTarget | null): Promise<void> {
+  if (!target) {
+    vscode.window.showErrorMessage(
+      "Modelica: 対象クラスを特定できません。Modelica ビューでモデルを選ぶか、.mo ファイルを開いてください。"
+    );
+    return;
+  }
+  const className = target.qname;
+  if (target.kind === "package") {
+    vscode.window.showInformationMessage(
+      `Modelica: ${className} はパッケージです。Modelica ビューで中のモデル/ブロックを選んでください。`
+    );
+    return;
+  }
+
+  const resolve = makeClassTextResolver(
+    await getRootMap(),
+    typeScopes(className, target.file)
+  );
+  const layer = graphics.buildInheritedIconLayer(target.text, className, resolve);
+
+  // アイコンに配置されたコネクタ（RealInput など）を、それぞれのアイコン込みで集める。
+  const nodes: IconNode[] = [];
+  for (const { component, scope } of graphics.collectInheritedIconComponents(
+    target.text,
+    className,
+    resolve
+  )) {
+    const portType = resolve(component.typeName, scope);
+    const icon: GraphicsLayer | null = portType
+      ? graphics.buildInheritedIconLayer(portType.text, portType.className, resolve)
+      : null;
+    nodes.push({ component, icon: icon && icon.primitives.length ? icon : null });
+  }
+
+  if (!layer.primitives.length && !nodes.length) {
+    vscode.window.showInformationMessage(
+      `Modelica: ${className || "このクラス"} に Icon の図形がありません（継承元にもありません）。`
+    );
+    return;
+  }
+
+  const icon = graphics.buildIconSvg(layer, nodes, {
+    className: className.split(".").filter(Boolean).at(-1) ?? "",
+  });
+
+  if (!iconPanel) {
+    iconPanel = vscode.window.createWebviewPanel(
+      "modelicaIcon",
+      "Modelica Icon",
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: true }
+    );
+    iconPanel.onDidDispose(() => {
+      iconPanel = undefined;
+    });
+  }
+  iconPanel.title = `Icon: ${className || ""}`.trim();
+  iconPanel.webview.html = getGraphicsHtml(iconPanel.webview, icon);
+  iconPanel.reveal(vscode.ViewColumn.Beside, true);
 }
 
 // =====================================================================
@@ -1909,6 +1980,9 @@ export function activate(context: vscodeTypes.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("modelica.toggleAnnotations", () =>
       toggleAnnotations()
+    ),
+    vscode.commands.registerCommand("modelica.showIcon", async (arg) =>
+      showIcon(await classTargetForCommand(arg))
     ),
     vscode.commands.registerCommand("modelica.showDiagram", async (arg) =>
       showDiagram(await classTargetForCommand(arg))

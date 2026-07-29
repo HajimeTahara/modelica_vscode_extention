@@ -2,7 +2,7 @@
   "name": "modelica-vscode",
   "displayName": "Modelica Language",
   "description": "Modelica 言語のシンタックスハイライトと言語サポート（EAST ライブラリ開発用）",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "publisher": "east",
   "license": "MIT",
   "engines": {
@@ -173,6 +173,12 @@
         "icon": "$(circuit-board)"
       },
       {
+        "command": "modelica.showIcon",
+        "title": "アイコンを表示",
+        "category": "Modelica",
+        "icon": "$(symbol-color)"
+      },
+      {
         "command": "modelica.packageTree.refresh",
         "title": "パッケージツリーを再読み込み",
         "category": "Modelica",
@@ -280,9 +286,14 @@
           "group": "navigation@5"
         },
         {
+          "command": "modelica.showIcon",
+          "when": "resourceLangId == modelica",
+          "group": "navigation@6"
+        },
+        {
           "command": "modelica.packageTree.clearFocus",
           "when": "resourceLangId == modelica && config.modelica.tree.focusDefinition",
-          "group": "navigation@6"
+          "group": "navigation@7"
         }
       ],
       "view/title": [
@@ -348,6 +359,10 @@
         },
         {
           "command": "modelica.showDiagram",
+          "when": "resourceLangId == modelica"
+        },
+        {
+          "command": "modelica.showIcon",
           "when": "resourceLangId == modelica"
         },
         {

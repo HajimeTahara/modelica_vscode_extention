@@ -9,6 +9,7 @@
 import { DEFAULT_EXTENT } from "./types";
 import type {
   DiagramComponent,
+  DiagramConnection,
   DiagramLayer,
   Extent,
   FillPattern,
@@ -492,6 +493,16 @@ export function renderComponentIcon(
   return mappedIconGroup(layer.extent, target, inner);
 }
 
+/** 配置（origin / rotation）を反映する SVG transform 属性。不要なら空文字。 */
+function placementTransform(component: DiagramComponent): string {
+  const origin = component.origin;
+  const ox = origin ? origin[0] : 0;
+  const oy = origin ? origin[1] : 0;
+  return ox !== 0 || oy !== 0 || component.rotation !== 0
+    ? ` transform="translate(${n(ox)} ${n(oy)}) rotate(${n(component.rotation)})"`
+    : "";
+}
+
 /** 配置済みコンポーネント 1 個（origin / rotation 反映）を描く。 */
 function renderPlacedComponent(
   component: DiagramComponent,
@@ -499,15 +510,9 @@ function renderPlacedComponent(
   flip: FlipSigns,
   nextId: () => string
 ): string {
-  const origin = component.origin;
-  const ox = origin ? origin[0] : 0;
-  const oy = origin ? origin[1] : 0;
-  const transform =
-    ox !== 0 || oy !== 0 || component.rotation !== 0
-      ? ` transform="translate(${n(ox)} ${n(oy)}) rotate(${n(component.rotation)})"`
-      : "";
   const inner = renderComponentIcon(layer, component.extent, component.name, flip, nextId);
   if (!inner) return "";
+  const transform = placementTransform(component);
   return transform ? `<g${transform}>${inner}</g>` : inner;
 }
 
@@ -541,19 +546,23 @@ function fallbackNode(component: DiagramComponent, labelSize: number): string {
 }
 
 /** 実際に描画される要素（配置・接続線・自前図形）の広がり。要素が無ければ null。 */
-function contentExtent(layer: DiagramLayer): Extent | null {
+function contentExtent(
+  primitives: GraphicPrimitive[],
+  components: DiagramComponent[],
+  connections: DiagramConnection[]
+): Extent | null {
   const xs: number[] = [];
   const ys: number[] = [];
   const push = (x: number, y: number) => {
     xs.push(x);
     ys.push(y);
   };
-  for (const c of layer.components) {
+  for (const c of components) {
     const o = c.origin ?? [0, 0];
     for (const p of c.extent) push(o[0] + p[0], o[1] + p[1]);
   }
-  for (const cn of layer.connections) for (const p of cn.points) push(p[0], p[1]);
-  for (const p of layer.primitives) {
+  for (const cn of connections) for (const p of cn.points) push(p[0], p[1]);
+  for (const p of primitives) {
     const o = p.origin;
     if (p.type === "line" || p.type === "polygon") {
       for (const pt of p.points) push(o[0] + pt[0], o[1] + pt[1]);
@@ -602,7 +611,10 @@ export function buildDiagramSvg(
   const view =
     options.expandToContent === false
       ? layer.extent
-      : unionExtent(layer.extent, contentExtent(layer));
+      : unionExtent(
+          layer.extent,
+          contentExtent(layer.primitives, layer.components, layer.connections)
+        );
   const v = normalizeExtent(view);
   const pad = Math.max(v.w, v.h) * 0.08 + 4;
   const labelSize = Math.max(canvasRect.w, canvasRect.h) * 0.02;
@@ -689,6 +701,119 @@ export function buildDiagramSvg(
     )} ${n(viewBox.width)} ${n(viewBox.height)}" preserveAspectRatio="xMidYMid meet">` +
     `<g transform="scale(1 -1)">${canvasSvg}</g>` +
     // グリッドは webview 側が viewBox に合わせて描き足す（SVG 座標のまま）。
+    `<g id="mg-grid"></g>` +
+    `<g transform="scale(1 -1)">${parts.join("")}</g>` +
+    `</svg>`;
+
+  return {
+    svg,
+    viewBox,
+    canvas: { x: canvasRect.x, y: canvasRect.y, width: canvasRect.w, height: canvasRect.h },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// アイコン全体
+// ---------------------------------------------------------------------------
+
+/** Icon 上に配置されたコンポーネント（コネクタ）と、その解決済みアイコン。 */
+export interface IconNode {
+  component: DiagramComponent;
+  /** 解決できなかった／図形が無いときは null（代替表示になる）。 */
+  icon: GraphicsLayer | null;
+}
+
+/** buildIconSvg の描画オプション。 */
+export interface IconSvgOptions extends DiagramSvgOptions {
+  /** 図形テキストの `%name` を置き換えるクラス名（通常は単純名）。 */
+  className?: string;
+}
+
+/** アイコンが解決できないコネクタの簡易表示（配置 extent に破線枠＋名前）。 */
+function connectorFallback(component: DiagramComponent): string {
+  const r = normalizeExtent(component.extent);
+  const labelSize = Math.max(Math.min(r.w, r.h) * 0.4, 4);
+  const inner =
+    `<rect x="${n(r.x)}" y="${n(r.y)}" width="${n(r.w)}" height="${n(
+      r.h
+    )}" fill="rgba(24,124,137,0.06)" stroke="${SELECT_COLOR}" stroke-width="1"` +
+    ` stroke-dasharray="3 2" vector-effect="non-scaling-stroke" />` +
+    `<g transform="translate(${n(r.cx)} ${n(r.cy)}) scale(1 -1)">` +
+    `<text x="0" y="0" font-size="${n(
+      labelSize
+    )}" fill="rgb(30,58,138)" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif">${esc(
+      component.name
+    )}</text></g>`;
+  const transform = placementTransform(component);
+  return transform ? `<g${transform}>${inner}</g>` : inner;
+}
+
+/**
+ * Icon レイヤ（継承込みで合成済み）と配置コネクタから SVG を組み立てる。
+ * layer.extent がそのままアイコンの座標系＝キャンバスなので、図形は写像せず
+ * ワールド座標のまま描く。描画順は Orbis の IconEditorCanvas と同じく
+ * 「図形（継承 → 自前の合成済み順） → 配置コネクタ」。
+ *
+ * 戻り値は buildDiagramSvg と同じ形で、webview 側のパン/ズーム・目盛り描画を共用する。
+ */
+export function buildIconSvg(
+  layer: GraphicsLayer,
+  nodes: IconNode[],
+  options: IconSvgOptions = {}
+): DiagramSvgResult {
+  const nextId = makeIdGen("mi");
+  const canvasRect = normalizeExtent(layer.extent.length ? layer.extent : DEFAULT_EXTENT);
+  const components = nodes.map((node) => node.component);
+  const view =
+    options.expandToContent === false
+      ? layer.extent
+      : unionExtent(layer.extent, contentExtent(layer.primitives, components, []));
+  const v = normalizeExtent(view);
+  const pad = Math.max(v.w, v.h) * 0.08 + 4;
+  const name = options.className ?? "";
+
+  const canvasSvg =
+    `<rect x="${n(canvasRect.x)}" y="${n(canvasRect.y)}" width="${n(
+      canvasRect.w
+    )}" height="${n(canvasRect.h)}" fill="${esc(
+      options.canvasFill ?? "rgb(255,255,255)"
+    )}" stroke="${esc(
+      options.canvasStroke ?? "rgb(148,163,184)"
+    )}" stroke-width="1.2" vector-effect="non-scaling-stroke" />`;
+
+  const parts: string[] = [];
+
+  // アイコン自身の図形（継承分は buildInheritedIconLayer で下に敷かれている）。
+  for (const primitive of layer.primitives) {
+    parts.push(renderPrimitive(primitive, name, NO_FLIP, nextId));
+  }
+
+  // 配置済みコネクタ（RealInput など）。
+  for (const node of nodes) {
+    const inner =
+      node.icon && node.icon.primitives.length
+        ? renderPlacedComponent(node.component, node.icon, NO_FLIP, nextId)
+        : connectorFallback(node.component);
+    if (!inner) continue;
+    parts.push(
+      `<g><title>${esc(node.component.name)} : ${esc(
+        node.component.typeName
+      )}</title>${inner}</g>`
+    );
+  }
+
+  const viewBox = {
+    x: v.x - pad,
+    y: -(v.y + v.h) - pad,
+    width: v.w + pad * 2,
+    height: v.h + pad * 2,
+  };
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${n(viewBox.x)} ${n(
+      viewBox.y
+    )} ${n(viewBox.width)} ${n(viewBox.height)}" preserveAspectRatio="xMidYMid meet">` +
+    `<g transform="scale(1 -1)">${canvasSvg}</g>` +
     `<g id="mg-grid"></g>` +
     `<g transform="scale(1 -1)">${parts.join("")}</g>` +
     `</svg>`;
