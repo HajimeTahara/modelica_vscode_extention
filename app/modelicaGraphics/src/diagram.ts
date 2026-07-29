@@ -56,20 +56,35 @@ function declOffset(text: string, name: string): number {
   return m ? m.index : -1;
 }
 
-/** Diagram(coordinateSystem(extent=…)) の座標系。無ければ既定 {{-100,-100},{100,100}}。 */
+/** 座標系の既定値（Modelica の既定は {{-100,-100},{100,100}}）。 */
+const DEFAULT_EXTENT: CoordExtent = {
+  xmin: -100,
+  ymin: -100,
+  xmax: 100,
+  ymax: 100,
+};
+
+/**
+ * Diagram(coordinateSystem(extent=…)) の座標系。
+ * Diagram 注釈や coordinateSystem が無ければ既定 {{-100,-100},{100,100}}。
+ * かならず coordinateSystem(…) の中だけを見る（外を探すと最初の Placement の
+ * extent を座標系と誤認し、図がその 1 コンポーネント分に切り取られてしまう）。
+ */
 export function parseDiagramExtent(text: string): CoordExtent {
-  const dm = /Diagram\s*\(/.exec(text);
-  let region = text;
-  if (dm) {
-    const open = dm.index + dm[0].length - 1;
-    const close = matchParen(text, open);
-    if (close > 0) region = text.slice(open + 1, close);
-  }
-  const es = extractBraceValue(region, "extent");
-  const a: Extent = (es && toExtent(parseNumberArray(es))) || [
-    [-100, -100],
-    [100, 100],
-  ];
+  const dm = /\bDiagram\s*\(/.exec(text);
+  if (!dm) return { ...DEFAULT_EXTENT };
+  const open = dm.index + dm[0].length - 1;
+  const close = matchParen(text, open);
+  if (close < 0) return { ...DEFAULT_EXTENT };
+  const region = text.slice(open + 1, close);
+  const cm = /\bcoordinateSystem\s*\(/.exec(region);
+  if (!cm) return { ...DEFAULT_EXTENT };
+  const copen = cm.index + cm[0].length - 1;
+  const cclose = matchParen(region, copen);
+  if (cclose < 0) return { ...DEFAULT_EXTENT };
+  const es = extractBraceValue(region.slice(copen + 1, cclose), "extent");
+  const a: Extent | null = (es && toExtent(parseNumberArray(es))) || null;
+  if (!a) return { ...DEFAULT_EXTENT };
   const xs = [a[0][0], a[1][0]];
   const ys = [a[0][1], a[1][1]];
   return {
@@ -196,6 +211,47 @@ function boxSvg(c: Placement): string {
 }
 
 /**
+ * 実際に描画される要素（配置・接続線）の広がり。要素が無ければ null。
+ * 回転は無視する（マージンで吸収できる程度のはみ出ししか生じない）。
+ */
+function contentExtent(
+  placements: Placement[],
+  connections: Connection[]
+): CoordExtent | null {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const c of placements) {
+    for (const p of c.extent) {
+      xs.push(c.origin[0] + p[0]);
+      ys.push(c.origin[1] + p[1]);
+    }
+  }
+  for (const cn of connections)
+    for (const p of cn.points || []) {
+      xs.push(p[0]);
+      ys.push(p[1]);
+    }
+  if (!xs.length || !ys.length) return null;
+  return {
+    xmin: Math.min(...xs),
+    xmax: Math.max(...xs),
+    ymin: Math.min(...ys),
+    ymax: Math.max(...ys),
+  };
+}
+
+/** 座標系を実内容の広がりまで広げる（座標系の外に置かれた要素も見えるように）。 */
+function unionExtent(a: CoordExtent, b: CoordExtent | null): CoordExtent {
+  if (!b) return a;
+  return {
+    xmin: Math.min(a.xmin, b.xmin),
+    xmax: Math.max(a.xmax, b.xmax),
+    ymin: Math.min(a.ymin, b.ymin),
+    ymax: Math.max(a.ymax, b.ymax),
+  };
+}
+
+/**
  * 解析済みのコンポーネント配置・接続・座標系から SVG を生成する。
  * opts.renderComponent(c) を渡すと各コンポーネントの描画 SVG 断片を差し替えできる
  * （Icon 描画などに利用）。返り値が falsy なら既定のボックス描画にフォールバックする。
@@ -207,11 +263,12 @@ export function buildDiagramSvg(
   opts?: DiagramOptions
 ): string {
   const o: DiagramOptions = opts || {};
+  const view = unionExtent(extent, contentExtent(placements, connections));
   const margin = 10;
-  const vbX = extent.xmin - margin;
-  const vbY = -extent.ymax - margin;
-  const vbW = extent.xmax - extent.xmin + 2 * margin;
-  const vbH = extent.ymax - extent.ymin + 2 * margin;
+  const vbX = view.xmin - margin;
+  const vbY = -view.ymax - margin;
+  const vbW = view.xmax - view.xmin + 2 * margin;
+  const vbH = view.ymax - view.ymin + 2 * margin;
 
   const parts: string[] = [];
   for (const cn of connections) {

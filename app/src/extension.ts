@@ -100,38 +100,66 @@ function updateParentOrder(dir: string, name: string): void {
   }
 }
 
-/** コマンド起動元から作成先ディレクトリを決定する */
-function resolveTargetDir(uri?: vscodeTypes.Uri): string | undefined {
-  if (uri && uri.fsPath) {
-    try {
-      return fs.statSync(uri.fsPath).isDirectory()
-        ? uri.fsPath
-        : path.dirname(uri.fsPath);
-    } catch (_) {
-      /* fall through */
+/** 修飾名の所在フォルダ（パッケージならそのフォルダ、クラスなら定義ファイルの置き場）。 */
+async function dirOfQname(qname: string): Promise<string | undefined> {
+  const c = symbols.resolveContainer(qname, await getRootMap());
+  if (!c) return undefined;
+  return c.type === "dir" ? c.path : path.dirname(c.path);
+}
+
+/**
+ * コマンド起動元から作成先ディレクトリを決定する。
+ *  - Modelica ビューの項目（qname を持つ）… そのパッケージのフォルダ（クラスならその置き場）
+ *  - Uri                                  … そのフォルダ（ファイルなら親フォルダ）
+ *  - 引数なし                             … ツリーで選択中の項目 → 開いているエディタの場所
+ *                                           → ワークスペースフォルダ
+ */
+async function resolveTargetDir(arg?: unknown): Promise<string | undefined> {
+  if (arg && typeof arg === "object") {
+    const node = arg as { qname?: unknown };
+    if (typeof node.qname === "string") return await dirOfQname(node.qname);
+    const uri = arg as vscodeTypes.Uri;
+    if (uri.fsPath) {
+      try {
+        return fs.statSync(uri.fsPath).isDirectory()
+          ? uri.fsPath
+          : path.dirname(uri.fsPath);
+      } catch (_) {
+        /* fall through */
+      }
     }
+  }
+  // ビューのタイトルバー（＋ ボタン）からは引数が来ないため、ツリーの選択を使う。
+  const selected = selectedTreeQname();
+  if (selected) {
+    const dir = await dirOfQname(selected);
+    if (dir) return dir;
   }
   const ed = vscode.window.activeTextEditor;
   if (ed && ed.document.uri.scheme === "file") {
     return path.dirname(ed.document.uri.fsPath);
   }
   const folders = vscode.workspace.workspaceFolders;
-  if (folders && folders.length) return folders[0]!.uri.fsPath;
-  return undefined;
+  if (!folders || !folders.length) return undefined;
+  if (folders.length === 1) return folders[0]!.uri.fsPath;
+  const picked = await vscode.window.showWorkspaceFolderPick({
+    placeHolder: "作成先のワークスペースフォルダ",
+  });
+  return picked ? picked.uri.fsPath : undefined;
 }
 
-async function createEntity(kind: EntityKind, uri?: vscodeTypes.Uri): Promise<void> {
-  const dir = resolveTargetDir(uri);
+async function createEntity(kind: EntityKind, arg?: unknown): Promise<void> {
+  const dir = await resolveTargetDir(arg);
   if (!dir) {
     vscode.window.showErrorMessage(
-      "作成先フォルダを特定できません。エクスプローラーでフォルダを右クリックするか、.mo ファイルを開いてください。"
+      "作成先フォルダを特定できません。Modelica ビューでパッケージを右クリックするか、.mo ファイルを開いてください。"
     );
     return;
   }
 
   const name = await vscode.window.showInputBox({
     title: `Modelica: ${KIND_LABEL[kind]}を新規作成`,
-    prompt: `${KIND_LABEL[kind]}の名前`,
+    prompt: `${KIND_LABEL[kind]}の名前（作成先: ${qualifiedName(dir) || dir}）`,
     validateInput: (v) =>
       isValidIdent(v)
         ? undefined
@@ -185,7 +213,59 @@ let output!: vscodeTypes.OutputChannel;
 let extContext!: vscodeTypes.ExtensionContext; // workspaceState 用
 let docPanel: vscodeTypes.WebviewPanel | undefined; // Documentation 表示の Webview（使い回し）
 let diagramPanel: vscodeTypes.WebviewPanel | undefined; // Diagram View の Webview（使い回し）
+let packageTreeView: vscodeTypes.TreeView<modelicaTree.ModelicaTreeNode> | undefined;
 const annotationsHidden = new Set<string>(); // annotation を折りたたみ中のドキュメント URI
+
+/** Modelica ビューで選択中の項目の修飾名。選択が無ければ undefined。 */
+function selectedTreeQname(): string | undefined {
+  const sel = packageTreeView && packageTreeView.selection;
+  return sel && sel.length ? sel[0]!.qname : undefined;
+}
+
+/**
+ * コマンド引数（ツリー項目）から修飾名を得る。
+ * コマンドパレット等で引数が無い場合はツリーの選択にフォールバックする。
+ */
+function qnameForCommand(arg: unknown): string | undefined {
+  if (arg && typeof arg === "object") {
+    const node = arg as { qname?: unknown };
+    if (typeof node.qname === "string") return node.qname;
+  }
+  return selectedTreeQname();
+}
+
+/** Modelica 形式の修飾名（Modelica.Blocks.Examples.RealNetwork1）をクリップボードへ。 */
+async function copyModelicaPath(arg: unknown): Promise<void> {
+  const qname = qnameForCommand(arg);
+  if (!qname) {
+    vscode.window.showWarningMessage(
+      "Modelica: コピー対象がありません。Modelica ビューで項目を選んでください。"
+    );
+    return;
+  }
+  await vscode.env.clipboard.writeText(qname);
+  vscode.window.setStatusBarMessage(`Modelica: コピーしました — ${qname}`, 3000);
+}
+
+/** 定義ファイルのパスをクリップボードへ。 */
+async function copyFilePath(arg: unknown): Promise<void> {
+  const qname = qnameForCommand(arg);
+  if (!qname) {
+    vscode.window.showWarningMessage(
+      "Modelica: コピー対象がありません。Modelica ビューで項目を選んでください。"
+    );
+    return;
+  }
+  const loc = symbols.resolveClass(qname, await getRootMap());
+  if (!loc || !loc.file) {
+    vscode.window.showWarningMessage(
+      `Modelica: ${qname} の定義ファイルが見つかりません。`
+    );
+    return;
+  }
+  await vscode.env.clipboard.writeText(loc.file);
+  vscode.window.setStatusBarMessage(`Modelica: コピーしました — ${loc.file}`, 3000);
+}
 
 /** 拡張設定。 */
 interface ModelicaConfig {
@@ -1038,20 +1118,13 @@ async function getRootMap(): Promise<RootMap> {
 
 /**
  * コマンド引数から対象ドキュメントを求める。
- * ツリー項目（qname を持つ）→ その定義ファイル、エディタタイトル等の Uri → そのファイル、
- * 引数なし → アクティブエディタ。見つからなければ null（呼び出し側でメッセージを出す）。
+ * エディタタイトル等の Uri → そのファイル、引数なし → アクティブエディタ。
+ * 見つからなければ null（呼び出し側でメッセージを出す）。
  */
 async function documentForCommand(
   arg: unknown
 ): Promise<vscodeTypes.TextDocument | null> {
   if (arg && typeof arg === "object") {
-    const node = arg as { qname?: unknown };
-    if (typeof node.qname === "string") {
-      const rootMap = await getRootMap();
-      const loc = symbols.resolveClass(node.qname, rootMap);
-      if (!loc || !loc.file) return null;
-      return await vscode.workspace.openTextDocument(loc.file);
-    }
     const uri = arg as vscodeTypes.Uri;
     if (uri.scheme === "file" && uri.fsPath) {
       return await vscode.workspace.openTextDocument(uri);
@@ -1059,6 +1132,92 @@ async function documentForCommand(
   }
   const ed = vscode.window.activeTextEditor;
   return ed ? ed.document : null;
+}
+
+/** Documentation / Diagram 表示の対象クラス（本文はそのクラスの範囲だけ）。 */
+interface ClassTarget {
+  /** 表示・型解決に使う完全修飾名。 */
+  qname: string;
+  kind: symbols.ClassKind;
+  /** クラス定義の本文（`model X … end X;` の範囲）。 */
+  text: string;
+  /** 定義ファイル。 */
+  file: string;
+}
+
+/**
+ * ファイルの修飾名とファイル内のクラス経路から完全修飾名を作る。
+ * package.mo の主クラス名はファイル修飾名の末尾と重複するため取り除く。
+ */
+function qnameOfPath(file: string, classPath: string[]): string {
+  const segs = (classNameForFile(file) || "").split(".").filter(Boolean);
+  const rest =
+    segs.length && classPath.length && segs[segs.length - 1] === classPath[0]
+      ? classPath.slice(1)
+      : classPath;
+  return [...segs, ...rest].join(".");
+}
+
+/**
+ * コマンド引数から対象クラスを求める。
+ *  - Modelica ビューの項目（qname を持つ）… そのクラスの定義だけ
+ *  - エディタ / Uri                       … カーソル位置を含む最も内側のクラス定義だけ
+ * 1 ファイルに複数クラスを書いた package.mo でも、対象クラスの範囲だけを切り出す。
+ */
+async function classTargetForCommand(arg: unknown): Promise<ClassTarget | null> {
+  if (arg && typeof arg === "object") {
+    const node = arg as { qname?: unknown };
+    if (typeof node.qname === "string") {
+      const src = symbols.readClassSource(node.qname, await getRootMap());
+      if (!src) return null;
+      return { qname: node.qname, kind: src.kind, text: src.text, file: src.file };
+    }
+  }
+  const doc = await documentForCommand(arg);
+  if (!doc || doc.languageId !== "modelica") return null;
+  const file = doc.uri.fsPath;
+  const text = doc.getText();
+  // 同じドキュメントがアクティブならカーソル位置のクラス、そうでなければ先頭のクラス。
+  const ed = vscode.window.activeTextEditor;
+  const offset =
+    ed && ed.document.uri.toString() === doc.uri.toString()
+      ? doc.offsetAt(ed.selection.active)
+      : 0;
+  const src = symbols.classSourceAt(text, offset);
+  if (!src) return { qname: classNameForFile(file), kind: "class", text, file };
+  return {
+    qname: qnameOfPath(file, src.path),
+    kind: src.kind,
+    text: src.text,
+    file,
+  };
+}
+
+/**
+ * 相対的に書かれた型名を解決するときに試す接頭辞（内側スコープ順）。
+ * 対象クラスを囲むパッケージ群と、ファイルの所属パッケージ。
+ */
+function typeScopes(qname: string, file: string): string[] {
+  const segs = qname.split(".").filter(Boolean);
+  const out: string[] = [];
+  for (let i = segs.length - 1; i >= 1; i--) out.push(segs.slice(0, i).join("."));
+  const dirQ = qualifiedName(path.dirname(file));
+  if (dirQ && !out.includes(dirQ)) out.push(dirQ);
+  return out;
+}
+
+/** 型名（相対名かもしれない）を scopes で補完し、実在するクラスの修飾名にする。 */
+function resolveTypeName(
+  name: string,
+  scopes: string[],
+  rootMap: RootMap
+): string | null {
+  if (symbols.classExists(name, rootMap)) return name;
+  for (const s of scopes) {
+    const q = s + "." + name;
+    if (symbols.classExists(q, rootMap)) return q;
+  }
+  return null;
 }
 
 const definitionProvider: vscodeTypes.DefinitionProvider = {
@@ -1117,10 +1276,20 @@ const MODELICA_KEYWORDS = [
 
 const BUILTIN_TYPES = ["Real", "Integer", "Boolean", "String"];
 
-/** name→CompletionItem（クラス/パッケージ）。 */
+/** name→CompletionItem（クラス/パッケージ）。Modelica のクラス種別ごとにアイコンを変える。 */
 function classItem(name: string, kind: string): vscodeTypes.CompletionItem {
   const K = vscode.CompletionItemKind;
-  return new vscode.CompletionItem(name, kind === "package" ? K.Module : K.Class);
+  const map: Record<string, vscodeTypes.CompletionItemKind> = {
+    package: K.Module,
+    record: K.Struct,
+    connector: K.Interface,
+    type: K.TypeParameter,
+    function: K.Function,
+    operator: K.Operator,
+  };
+  const it = new vscode.CompletionItem(name, map[kind] ?? K.Class);
+  it.detail = kind;
+  return it;
 }
 
 const completionProvider: vscodeTypes.CompletionItemProvider = {
@@ -1314,15 +1483,15 @@ function getDocHtml(
 </html>`;
 }
 
-async function showDocumentation(
-  doc: vscodeTypes.TextDocument | null
-): Promise<void> {
-  if (!doc || doc.languageId !== "modelica") {
-    vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
+async function showDocumentation(target: ClassTarget | null): Promise<void> {
+  if (!target) {
+    vscode.window.showErrorMessage(
+      "Modelica: 対象クラスを特定できません。Modelica ビューでクラスを選ぶか、.mo ファイルを開いてください。"
+    );
     return;
   }
-  const { className } = resolveTarget(doc);
-  const html = annotations.extractDocumentation(doc.getText());
+  const className = target.qname;
+  const html = annotations.extractDocumentation(target.text);
   if (!html) {
     vscode.window.showInformationMessage(
       `Modelica: ${className || "このモデル"} に Documentation はありません。`
@@ -1414,46 +1583,29 @@ function getDiagramHtml(
 }
 
 /**
- * file 内のクラス（simpleName）の Icon 図形を extends を辿って収集する。
+ * クラス qname の Icon 図形を extends を辿って収集する。
  * 基底クラスの graphics を先（下）に、派生クラスを後（上）に積む。
  * 返り値 {coord, graphics}。graphics が空なら Icon 無し。
  */
-function collectIconFromFile(
-  file: string,
-  simpleName: string,
+function collectIcon(
+  qname: string,
   rootMap: RootMap,
   seen: Set<string>
 ): IconDef {
-  const key = file + "::" + simpleName;
-  if (seen.has(key)) return { coord: null, graphics: [] };
-  seen.add(key);
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch (_) {
-    return { coord: null, graphics: [] };
-  }
-  const body = symbols.extractClassBody(text, simpleName) || text;
-  const dir = path.dirname(file);
   const merged: IconDef = { coord: null, graphics: [] };
-  for (const base of graphics.parseExtends(body)) {
-    let bcls = symbols.resolveClass(base, rootMap);
-    if (!bcls) {
-      const q = util.qualifiedName(dir);
-      if (q) bcls = symbols.resolveClass(q + "." + base, rootMap);
-    }
-    if (bcls && bcls.file) {
-      const bi = collectIconFromFile(
-        bcls.file,
-        base.split(".").pop()!,
-        rootMap,
-        seen
-      );
-      if (bi.graphics.length) merged.graphics.push(...bi.graphics);
-      if (!merged.coord && bi.coord) merged.coord = bi.coord;
-    }
+  if (seen.has(qname)) return merged;
+  seen.add(qname);
+  const src = symbols.readClassSource(qname, rootMap);
+  if (!src) return merged;
+  const scopes = typeScopes(qname, src.file);
+  for (const base of graphics.parseExtends(src.text)) {
+    const bq = resolveTypeName(base, scopes, rootMap);
+    if (!bq) continue;
+    const bi = collectIcon(bq, rootMap, seen);
+    if (bi.graphics.length) merged.graphics.push(...bi.graphics);
+    if (!merged.coord && bi.coord) merged.coord = bi.coord;
   }
-  const own = graphics.parseIcon(body);
+  const own = graphics.parseIcon(src.text);
   if (own) {
     if (own.graphics.length) merged.graphics.push(...own.graphics);
     if (own.coord) merged.coord = own.coord;
@@ -1461,13 +1613,21 @@ function collectIconFromFile(
   return merged;
 }
 
-async function showDiagram(doc: vscodeTypes.TextDocument | null): Promise<void> {
-  if (!doc || doc.languageId !== "modelica") {
-    vscode.window.showErrorMessage("Modelica ファイルを開いてください。");
+async function showDiagram(target: ClassTarget | null): Promise<void> {
+  if (!target) {
+    vscode.window.showErrorMessage(
+      "Modelica: 対象クラスを特定できません。Modelica ビューでモデルを選ぶか、.mo ファイルを開いてください。"
+    );
     return;
   }
-  const { className } = resolveTarget(doc);
-  const text = doc.getText();
+  const className = target.qname;
+  if (target.kind === "package") {
+    vscode.window.showInformationMessage(
+      `Modelica: ${className} はパッケージです。Modelica ビューで中のモデル/ブロックを選んでください。`
+    );
+    return;
+  }
+  const text = target.text;
   const comps = symbols.parseComponents(text);
   const placements = graphics.parseComponentPlacements(text, comps);
   const connections = graphics.parseConnections(text);
@@ -1481,21 +1641,15 @@ async function showDiagram(doc: vscodeTypes.TextDocument | null): Promise<void> 
 
   // 各コンポーネント型の Icon 図形（extends 継承込み）を解決・キャッシュ
   const rootMap = await getRootMap();
-  const dirQ = util.qualifiedName(path.dirname(doc.uri.fsPath));
+  const scopes = typeScopes(className, target.file);
   const iconCache = new Map<string, IconDef | null>();
   const iconForType = (type: string): IconDef | null => {
     const cached = iconCache.get(type);
     if (cached !== undefined) return cached;
     let icon: IconDef | null = null;
-    let cls = symbols.resolveClass(type, rootMap);
-    if (!cls && dirQ) cls = symbols.resolveClass(dirQ + "." + type, rootMap);
-    if (cls && cls.file) {
-      const merged = collectIconFromFile(
-        cls.file,
-        type.split(".").pop()!,
-        rootMap,
-        new Set<string>()
-      );
+    const q = resolveTypeName(type, scopes, rootMap);
+    if (q) {
+      const merged = collectIcon(q, rootMap, new Set<string>());
       if (merged.graphics.length) {
         if (!merged.coord) {
           const def: CoordExtent = { xmin: -100, ymin: -100, xmax: 100, ymax: 100 };
@@ -1630,8 +1784,8 @@ export function activate(context: vscodeTypes.ExtensionContext): void {
   };
   for (const [command, kind] of Object.entries(createCommands)) {
     context.subscriptions.push(
-      vscode.commands.registerCommand(command, (uri?: vscodeTypes.Uri) =>
-        createEntity(kind, uri)
+      vscode.commands.registerCommand(command, (arg?: unknown) =>
+        createEntity(kind, arg)
       )
     );
   }
@@ -1666,24 +1820,31 @@ export function activate(context: vscodeTypes.ExtensionContext): void {
       foldingRangeProvider
     ),
     vscode.commands.registerCommand("modelica.showDocumentation", async (arg) =>
-      showDocumentation(await documentForCommand(arg))
+      showDocumentation(await classTargetForCommand(arg))
     ),
     vscode.commands.registerCommand("modelica.toggleAnnotations", () =>
       toggleAnnotations()
     ),
     vscode.commands.registerCommand("modelica.showDiagram", async (arg) =>
-      showDiagram(await documentForCommand(arg))
+      showDiagram(await classTargetForCommand(arg))
     )
   );
 
   // Modelica Packages ツリー（Activity Bar）
   const treeProvider = new modelicaTree.ModelicaTreeProvider(getRootMap);
+  packageTreeView = vscode.window.createTreeView<modelicaTree.ModelicaTreeNode>(
+    "modelica.packageTree",
+    { treeDataProvider: treeProvider, showCollapseAll: true }
+  );
   context.subscriptions.push(
     treeProvider,
-    vscode.window.createTreeView("modelica.packageTree", {
-      treeDataProvider: treeProvider,
-      showCollapseAll: true,
-    }),
+    packageTreeView,
+    vscode.commands.registerCommand("modelica.packageTree.copyModelicaPath", (arg) =>
+      copyModelicaPath(arg)
+    ),
+    vscode.commands.registerCommand("modelica.packageTree.copyFilePath", (arg) =>
+      copyFilePath(arg)
+    ),
     vscode.commands.registerCommand("modelica.packageTree.refresh", () => {
       rootMapCache = null;
       treeProvider.refresh();
@@ -1692,6 +1853,9 @@ export function activate(context: vscodeTypes.ExtensionContext): void {
       "modelica.packageTree.open",
       async (node: modelicaTree.ModelicaTreeNode) =>
         modelicaTree.openNode(node, await getRootMap())
+    ),
+    vscode.commands.registerCommand("modelica.packageTree.clearFocus", () =>
+      modelicaTree.clearFocus()
     )
   );
 

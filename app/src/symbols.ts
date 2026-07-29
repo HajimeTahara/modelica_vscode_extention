@@ -13,8 +13,17 @@ import * as fs from "fs";
 import * as path from "path";
 import * as util from "./util";
 
-/** ツリー/補完で区別する種別。 */
-export type ClassKind = "package" | "class";
+/** ツリー/補完で区別する種別（Modelica のクラスキーワードそのもの）。 */
+export type ClassKind =
+  | "package"
+  | "model"
+  | "class"
+  | "record"
+  | "block"
+  | "connector"
+  | "type"
+  | "function"
+  | "operator";
 
 /** ルートパッケージ名 → ディレクトリ（構造化ライブラリ）または .mo ファイル（単一ファイル）。 */
 export type RootMap = Record<string, string>;
@@ -24,6 +33,8 @@ export interface SymbolLocation {
   file: string;
   line: number;
   character: number;
+  /** 定義の最終行（クラスツリーから求まった場合のみ）。 */
+  endLine?: number;
 }
 
 /** テキスト内の位置（0 始まり）。 */
@@ -48,6 +59,21 @@ export interface Component {
 export interface Container {
   type: "dir" | "file";
   path: string;
+  /** type==="file" のとき: そのファイルの主クラス名。 */
+  own?: string;
+  /** type==="file" のとき: 主クラスから下のネスト経路（空なら主クラス自身）。 */
+  nested?: string[];
+}
+
+/** ファイル内のクラス定義ツリー（ネスト構造を保つ）。 */
+export interface ClassNode {
+  name: string;
+  kind: ClassKind;
+  /** クラスキーワードの開始オフセット。 */
+  offset: number;
+  /** 定義の終端オフセット（`end Name;` の直後、短縮形は `;` の直後）。 */
+  endOffset: number;
+  children: ClassNode[];
 }
 
 /** パッケージ/クラスの子。 */
@@ -67,6 +93,15 @@ export interface ClassSpan {
   start: number;
   end: number;
   name: string;
+}
+
+/** クラス定義の本文（1 ファイルに複数クラスがある場合の切り出し結果）。 */
+export interface ClassSource {
+  /** クラス単純名。 */
+  name: string;
+  kind: ClassKind;
+  /** 定義本文（`model X … end X;` の範囲）。 */
+  text: string;
 }
 
 /** ドット付き識別子とその範囲。 */
@@ -128,6 +163,10 @@ const NON_TYPE = new Set([
   "encapsulated",
   "pure",
   "impure",
+  // 修飾子キーワードが型の位置に来るのは `final useHeatPort=true` のような
+  // 修飾リストの継続行。宣言ではないので拾わない（本物の宣言から Placement を
+  // 横取りしてしまう）。
+  ...DECL_PREFIX.split("|"),
 ]);
 
 function escapeRegExp(s: string): string {
@@ -203,6 +242,233 @@ export function readPrimaryClassName(text: string): string | null {
   return c ? c.name : null;
 }
 
+// =====================================================================
+// ファイル内クラスツリー（1 ファイルに階層をまるごと書く形式への対応）
+//
+// Modelica.Units のように package/class が 1 ファイルに入れ子で書かれる形式では、
+// ファイル = クラス 1 個ではなく「ファイルの中に階層がある」。ここではクラス見出しと
+// `end Name;` を対応付けてネスト構造を復元し、ツリー表示・定義ジャンプの土台にする。
+// =====================================================================
+
+// クラス見出し または `end Name;`。group1 = end の名前、group2/3 = 種別/クラス名。
+const CLASS_TOKEN = "\\bend\\s+([A-Za-z_]\\w*)\\s*;|" + CLASS_HEAD;
+
+/** クラスキーワード文字列を ClassKind に落とす（未知は "class"）。 */
+export function normalizeKind(kw: string | undefined): ClassKind {
+  return kw && CLASS_KW_SET.has(kw) ? (kw as ClassKind) : "class";
+}
+
+/**
+ * pos 以降が短縮クラス定義（`type Angle = Real(...)` 等）かどうか。
+ * 短縮形は `end Name;` を持たないため、ネストの入れ物として扱ってはいけない。
+ */
+function isShortClassDefinition(text: string, pos: number): boolean {
+  let i = pos;
+  const n = text.length;
+  for (;;) {
+    while (i < n && /\s/.test(text.charAt(i))) i++;
+    // 配列添字 `type T[3] = ...` は読み飛ばして次を見る。
+    if (text.charAt(i) === "[") {
+      const close = text.indexOf("]", i);
+      if (close < 0) return false;
+      i = close + 1;
+      continue;
+    }
+    return text.charAt(i) === "=";
+  }
+}
+
+/** pos 以降で、括弧の外に出てくる最初の `;` の直後の位置（短縮クラス定義の終端）。 */
+function statementEnd(text: string, pos: number): number {
+  let depth = 0;
+  for (let i = pos; i < text.length; i++) {
+    const c = text.charAt(i);
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === ";" && depth <= 0) return i + 1;
+  }
+  return text.length;
+}
+
+/**
+ * text 内のクラス定義をネスト構造のまま返す（トップレベルの配列）。
+ * コメント・文字列は空白化してから走査するため、Documentation 中の英文は拾わない。
+ */
+export function parseClassTree(text: string): ClassNode[] {
+  const blanked = blankCommentsAndStrings(text);
+  const re = new RegExp(CLASS_TOKEN, "g");
+  const roots: ClassNode[] = [];
+  const stack: ClassNode[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(blanked)) !== null) {
+    if (m[1]) {
+      // `end Name;`: 対応する見出しまで閉じる（取りこぼしがあっても復帰できる）。
+      // `end if;` 等はスタックに同名が無いため何も閉じない。
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i]!.name === m[1]) {
+          const endOffset = m.index + m[0].length;
+          for (let k = i; k < stack.length; k++) stack[k]!.endOffset = endOffset;
+          stack.length = i;
+          break;
+        }
+      }
+      continue;
+    }
+    const kw = normalizeKind(m[2]!);
+    let name = m[3]!;
+    let bodyStart = m.index + m[0].length;
+    if (CLASS_KW_SET.has(name)) continue;
+    if (name === "extends") {
+      // `redeclare function extends f(...) ... end f;` は extends の次が名前。
+      const nm = /^\s*([A-Za-z_]\w*)/.exec(blanked.slice(bodyStart, bodyStart + 64));
+      if (!nm) continue;
+      name = nm[1]!;
+      bodyStart += nm[0].length;
+    }
+    const node: ClassNode = {
+      name,
+      kind: kw,
+      offset: m.index,
+      endOffset: bodyStart,
+      children: [],
+    };
+    const parent = stack[stack.length - 1];
+    (parent ? parent.children : roots).push(node);
+    if (isShortClassDefinition(blanked, bodyStart)) {
+      // 短縮形は `;` まで（複数行にまたがる `type X = Real(\n …);` も 1 定義として扱う）。
+      node.endOffset = statementEnd(blanked, bodyStart);
+    } else {
+      // 終端は対応する `end Name;` を見つけた時点で埋める。
+      stack.push(node);
+    }
+  }
+  return roots;
+}
+
+/** parseClassTree の結果を mtime/size で使い回す（大きなライブラリファイル対策）。 */
+interface TreeCacheEntry {
+  mtimeMs: number;
+  size: number;
+  roots: ClassNode[];
+}
+const treeCache = new Map<string, TreeCacheEntry>();
+
+/** file のクラスツリー。読めなければ空配列。 */
+export function readClassTree(file: string): ClassNode[] {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(file);
+  } catch (_) {
+    return [];
+  }
+  const hit = treeCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.roots;
+  let roots: ClassNode[];
+  try {
+    roots = parseClassTree(fs.readFileSync(file, "utf8"));
+  } catch (_) {
+    return [];
+  }
+  treeCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, roots });
+  return roots;
+}
+
+/** ファイルの主クラス（own 名に一致するもの、無ければ唯一のトップ）。 */
+function topNode(roots: ClassNode[], own: string): ClassNode {
+  const named = roots.find((n) => n.name === own);
+  if (named) return named;
+  if (roots.length === 1) return roots[0]!;
+  // 主クラスが特定できないファイルは、トップレベル全部を own の子として扱う。
+  return { name: own, kind: "package", offset: 0, endOffset: 0, children: roots };
+}
+
+/** nodes から名前経路をたどる。 */
+function findNode(nodes: ClassNode[], segs: string[]): ClassNode | null {
+  let list = nodes;
+  let node: ClassNode | null = null;
+  for (const s of segs) {
+    const found = list.find((n) => n.name === s);
+    if (!found) return null;
+    node = found;
+    list = found.children;
+  }
+  return node;
+}
+
+/** file 内の own（主クラス）から nested をたどったノード。 */
+function nodeInFile(
+  file: string,
+  own: string,
+  nested: string[]
+): ClassNode | null {
+  const roots = readClassTree(file);
+  if (!roots.length) return null;
+  const top = topNode(roots, own);
+  return nested.length ? findNode(top.children, nested) : top;
+}
+
+/** file 内の own → nested のクラス定義位置。見つからなければ末尾名で緩く探す。 */
+function declInFileNested(
+  file: string,
+  own: string,
+  nested: string[]
+): SymbolLocation | null {
+  const node = nodeInFile(file, own, nested);
+  if (!node) {
+    const last = nested.length ? nested[nested.length - 1]! : own;
+    return declInFile(file, last);
+  }
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (_) {
+    return null;
+  }
+  const pos = offsetToPosition(text, node.offset);
+  const end = offsetToPosition(text, Math.max(node.offset, node.endOffset - 1));
+  return {
+    file,
+    line: pos.line,
+    character: pos.character,
+    endLine: Math.max(pos.line, end.line),
+  };
+}
+
+/** ファイル先頭 bytes バイトだけ読む（種別判定にファイル全体を読まないため）。 */
+function readHead(file: string, bytes: number): string {
+  const fd = fs.openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(bytes);
+    const n = fs.readSync(fd, buf, 0, bytes, 0);
+    return buf.toString("utf8", 0, n);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+const kindCache = new Map<string, { mtimeMs: number; kind: ClassKind }>();
+
+/** .mo ファイルの主クラスの種別（package / model / type …）。読めなければ "class"。 */
+export function fileClassKind(file: string): ClassKind {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(file);
+  } catch (_) {
+    return "class";
+  }
+  const hit = kindCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs) return hit.kind;
+  let kind: ClassKind = "class";
+  try {
+    const c = readPrimaryClass(readHead(file, 16384));
+    if (c) kind = normalizeKind(c.kind);
+  } catch (_) {
+    /* 読めなければ既定の "class" */
+  }
+  kindCache.set(file, { mtimeMs: st.mtimeMs, kind });
+  return kind;
+}
+
 /**
  * rootMap の値がディレクトリ（package.mo を持つ構造化ライブラリ）でなく
  * 単一ファイルのルート（package.mo に属さない最上位の .mo）を指すか。
@@ -211,16 +477,11 @@ export function isFileRoot(rootPath: string | undefined): boolean {
   return /\.mo$/i.test(String(rootPath));
 }
 
-/** ルートパッケージ名の種別 "package" | "class"。 */
+/** ルートパッケージ名の種別。 */
 export function rootKind(rootMap: RootMap, rootName: string): ClassKind {
   const p = rootMap[rootName];
-  if (!p || !isFileRoot(p)) return "package";
-  try {
-    const c = readPrimaryClass(fs.readFileSync(p, "utf8"));
-    return c && c.kind === "package" ? "package" : "class";
-  } catch (_) {
-    return "class";
-  }
+  if (!p) return "package";
+  return isFileRoot(p) ? fileClassKind(p) : "package";
 }
 
 /** offset 位置にあるドット付き識別子 {name, start, end} を返す。無ければ null。 */
@@ -303,12 +564,12 @@ export function resolveClass(
   if (!segs.length) return null;
   const rootDir = rootMap[segs[0]!];
   if (!rootDir) return null;
-  // 単一ファイルのルート: 以降のセグメントはすべてそのファイル内のネストクラス。
-  if (isFileRoot(rootDir)) return declInFile(rootDir, segs[segs.length - 1]!);
+  // 単一ファイルのルート: 以降のセグメントはすべてそのファイル内のネスト経路。
+  if (isFileRoot(rootDir))
+    return declInFileNested(rootDir, segs[0]!, segs.slice(1));
   if (segs.length === 1) {
-    return declInFile(path.join(rootDir, "package.mo"), segs[0]!);
+    return declInFileNested(path.join(rootDir, "package.mo"), segs[0]!, []);
   }
-  const lastName = segs[segs.length - 1]!;
   let cur = rootDir;
   for (let i = 1; i < segs.length; i++) {
     const seg = segs[i]!;
@@ -316,21 +577,30 @@ export function resolveClass(
     const asDir = path.join(cur, seg);
     const asFile = path.join(cur, seg + ".mo");
     if (last) {
-      if (fs.existsSync(asFile)) return declInFile(asFile, seg);
+      if (fs.existsSync(asFile)) return declInFileNested(asFile, seg, []);
       if (fs.existsSync(path.join(asDir, "package.mo")))
-        return declInFile(path.join(asDir, "package.mo"), seg);
-      return declInFile(path.join(cur, "package.mo"), seg);
+        return declInFileNested(path.join(asDir, "package.mo"), seg, []);
+      // cur/package.mo の中に書かれたネストクラス。
+      return declInFileNested(
+        path.join(cur, "package.mo"),
+        path.basename(cur),
+        [seg]
+      );
     }
     if (fs.existsSync(path.join(asDir, "package.mo"))) {
       cur = asDir;
       continue;
     }
     if (fs.existsSync(asFile)) {
-      // 残りセグメントは asFile 内のネストクラス。最終名で探す。
-      return declInFile(asFile, lastName);
+      // 残りセグメントは asFile 内のネスト経路。
+      return declInFileNested(asFile, seg, segs.slice(i + 1));
     }
-    // 途中が解決できない → cur の package.mo 内のネストクラスとして最終名を探す
-    return declInFile(path.join(cur, "package.mo"), lastName);
+    // 途中が解決できない → cur の package.mo 内のネスト経路として辿る。
+    return declInFileNested(
+      path.join(cur, "package.mo"),
+      path.basename(cur),
+      segs.slice(i)
+    );
   }
   return null;
 }
@@ -339,20 +609,64 @@ export function resolveClass(
 // 補完（② 入力予測）用の列挙・メンバー解決
 // =====================================================================
 
-/** クラス本体のコンポーネント/パラメータ宣言 [{name, type}] を集める。 */
+/** 括弧の外の `;` で文に分ける（コメント・文字列は空白化済みであること）。 */
+function splitStatements(blanked: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < blanked.length; i++) {
+    const c = blanked.charAt(i);
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === ";" && depth <= 0) {
+      out.push(blanked.slice(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < blanked.length) out.push(blanked.slice(start));
+  return out;
+}
+
+// 文の先頭に付きうる見出し（`;` で終わらないためひとつ前の文にくっつく）。
+// クラス見出し `model Foo` / セクション `equation`,`protected` / `end Foo`。
+const STATEMENT_HEAD = new RegExp(
+  "^\\s*(?:(?:partial|encapsulated|operator|expandable|pure|impure)\\s+)*(?:" +
+    CLASS_KW +
+    ")\\s+[A-Za-z_]\\w*" +
+    "|^\\s*(?:public|protected|initial\\s+equation|initial\\s+algorithm|equation|algorithm)\\b" +
+    "|^\\s*end\\s+[A-Za-z_]\\w*"
+);
+
+// 文の先頭にある宣言 `<修飾子>* 型 [配列] 名前`。group1 = 型、group2 = 名前。
+const DECLARATION = new RegExp(
+  "^\\s*(?:(?:" +
+    DECL_PREFIX +
+    ")\\s+)*([A-Za-z_][\\w.]*)(?:\\s*\\[[^\\]]*\\])?\\s+([A-Za-z_]\\w*)\\b"
+);
+
+/**
+ * クラス本体のコンポーネント/パラメータ宣言 [{name, type}] を集める。
+ *
+ * 行単位ではなく**文単位**（括弧の外の `;` 区切り）で見る。MSL には
+ * `Modelica.Blocks.Interfaces.RealInput` ↵ `u annotation(…)` のように型と名前が
+ * 別行の宣言があり、行単位ではこれを取りこぼす。また修飾子リストの継続行
+ * （`final useHeatPort=true`）は文の先頭に来ないため誤検出しなくなる。
+ * Documentation の英文を拾わないよう、コメント・文字列は空白化してから走査する。
+ */
 export function parseComponents(text: string): Component[] {
-  const lines = text.split(/\r?\n/);
-  const re = new RegExp(
-    "^(\\s*(?:(?:" +
-      DECL_PREFIX +
-      ")\\s+)*)([A-Za-z_][\\w.]*)((?:\\s*\\[[^\\]]*\\])?)\\s+([A-Za-z_]\\w*)\\b"
-  );
   const out: Component[] = [];
-  for (const line of lines) {
-    const m = re.exec(line);
+  for (const raw of splitStatements(blankCommentsAndStrings(text))) {
+    // 直前の文にくっついた見出しを剥がしてから、文の先頭を宣言として読む。
+    let st = raw;
+    for (;;) {
+      const h = STATEMENT_HEAD.exec(st);
+      if (!h || !h[0].length) break;
+      st = st.slice(h[0].length);
+    }
+    const m = DECLARATION.exec(st);
     if (!m) continue;
-    if (NON_TYPE.has(m[2]!)) continue;
-    out.push({ name: m[4]!, type: m[2]! });
+    if (NON_TYPE.has(m[1]!)) continue;
+    out.push({ name: m[2]!, type: m[1]! });
   }
   return out;
 }
@@ -369,6 +683,71 @@ export function extractClassBody(text: string, className: string): string {
   return m ? rest.slice(0, m.index) : rest;
 }
 
+/** クラスツリーから name のクラスを幅優先で探す（トップレベル優先）。 */
+function findNodeByName(roots: ClassNode[], name: string): ClassNode | null {
+  const queue = [...roots];
+  while (queue.length) {
+    const n = queue.shift()!;
+    if (n.name === name) return n;
+    queue.push(...n.children);
+  }
+  return null;
+}
+
+/** ClassNode をそのクラスの定義本文つきで返す。endOffset 未確定なら全文扱い。 */
+function sourceOfNode(text: string, node: ClassNode): ClassSource {
+  return {
+    name: node.name,
+    kind: node.kind,
+    text:
+      node.endOffset > node.offset
+        ? text.slice(node.offset, node.endOffset)
+        : text,
+  };
+}
+
+/**
+ * text 内で offset を含む最も内側のクラス定義を返す。
+ * どのクラスにも入っていない位置（within 行など）なら最初のトップレベルクラス。
+ * クラスが 1 つも無ければ null。
+ */
+export function classSourceAt(
+  text: string,
+  offset: number
+): (ClassSource & { path: string[] }) | null {
+  const roots = parseClassTree(text);
+  if (!roots.length) return null;
+  const path_: string[] = [];
+  let node: ClassNode | null = null;
+  let list = roots;
+  for (;;) {
+    const hit = list.find((n) => offset >= n.offset && offset < n.endOffset);
+    if (!hit) break;
+    node = hit;
+    path_.push(hit.name);
+    list = hit.children;
+  }
+  if (!node) {
+    node = roots[0]!;
+    path_.push(node.name);
+  }
+  return { ...sourceOfNode(text, node), path: path_ };
+}
+
+/** file 内のクラス name（ネスト含む）の定義本文。無ければ null。 */
+export function readClassSourceInFile(
+  file: string,
+  name: string
+): ClassSource | null {
+  const node = findNodeByName(readClassTree(file), name);
+  if (!node) return null;
+  try {
+    return sourceOfNode(fs.readFileSync(file, "utf8"), node);
+  } catch (_) {
+    return null;
+  }
+}
+
 /** extends のベースクラス名（ドット付き）一覧。 */
 export function parseExtends(text: string): string[] {
   const out: string[] = [];
@@ -378,16 +757,19 @@ export function parseExtends(text: string): string[] {
   return out;
 }
 
-/** file 内で宣言されるクラス名一覧（外側クラス excludeName は除く）。 */
-function listNestedClasses(text: string, excludeName: string): string[] {
-  const blanked = blankCommentsAndStrings(text);
-  const re = new RegExp(CLASS_HEAD, "g");
-  const out: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(blanked)) !== null) {
-    if (m[2] !== excludeName && !CLASS_KW_SET.has(m[2]!)) out.push(m[2]!);
-  }
-  return out;
+/**
+ * file の own（主クラス）から nested をたどった位置の「直下の」クラス一覧。
+ * ネスト構造を保つので、Units.mo のように 1 ファイルに階層をまるごと書いた形式でも
+ * 孫クラスが同じ階層に並んでしまうことがない。
+ */
+function childrenInFile(
+  file: string,
+  own: string,
+  nested: string[]
+): ChildItem[] {
+  const node = nodeInFile(file, own, nested);
+  if (!node) return [];
+  return node.children.map((n) => ({ name: n.name, kind: n.kind }));
 }
 
 /**
@@ -450,8 +832,13 @@ export function resolveContainer(
   const rootDir = rootMap[segs[0]!];
   if (!rootDir) return null;
   if (isFileRoot(rootDir)) {
-    // ルート自体がファイル。その中のネストクラスは更に辿れないため null。
-    return segs.length === 1 ? { type: "file", path: rootDir } : null;
+    // ルート自体がファイル。以降のセグメントはファイル内のネスト経路。
+    return {
+      type: "file",
+      path: rootDir,
+      own: segs[0]!,
+      nested: segs.slice(1),
+    };
   }
   let cur = rootDir;
   for (let i = 1; i < segs.length; i++) {
@@ -463,18 +850,106 @@ export function resolveContainer(
       continue;
     }
     if (fs.existsSync(asFile)) {
-      // 残りセグメントがある = ファイル内ネストクラス。その下は辿れないので null。
-      // （ここで file を返すと A.B.Nested がファイル A.B の中身を指してしまう）
-      return i === segs.length - 1 ? { type: "file", path: asFile } : null;
+      // 残りセグメントは asFile 内のネスト経路（Units.mo 形式）。
+      return {
+        type: "file",
+        path: asFile,
+        own: seg,
+        nested: segs.slice(i + 1),
+      };
     }
-    return null;
+    // ディレクトリにもファイルにも無い → cur/package.mo 内に書かれたネストクラス。
+    const pkgmo = path.join(cur, "package.mo");
+    if (!fs.existsSync(pkgmo)) return null;
+    return {
+      type: "file",
+      path: pkgmo,
+      own: path.basename(cur),
+      nested: segs.slice(i),
+    };
   }
   return { type: "dir", path: cur };
 }
 
+/** 修飾名 → 定義ファイルとファイル内経路（クラスが実在するかは見ない）。 */
+function fileRefOf(
+  qname: string,
+  rootMap: RootMap
+): { file: string; own: string; nested: string[] } | null {
+  const c = resolveContainer(qname, rootMap);
+  if (!c) return null;
+  // ディレクトリパッケージの実体は package.mo の主クラス。
+  if (c.type === "dir")
+    return {
+      file: path.join(c.path, "package.mo"),
+      own: path.basename(c.path),
+      nested: [],
+    };
+  return { file: c.path, own: c.own || "", nested: c.nested || [] };
+}
+
+/** qname のクラスが実在するか（本文は読まない＝クラスツリーのキャッシュだけで判定）。 */
+export function classExists(qname: string, rootMap: RootMap): boolean {
+  const ref = fileRefOf(qname, rootMap);
+  return !!ref && !!nodeInFile(ref.file, ref.own, ref.nested);
+}
+
+/**
+ * qname のクラス定義本文だけを切り出して返す。実在しなければ null。
+ * package.mo のように 1 ファイルへ複数クラスを書いた形式でも、対象クラスの範囲だけを返す。
+ */
+export function readClassSource(
+  qname: string,
+  rootMap: RootMap
+): (ClassSource & { file: string }) | null {
+  const ref = fileRefOf(qname, rootMap);
+  if (!ref) return null;
+  const node = nodeInFile(ref.file, ref.own, ref.nested);
+  if (!node) return null;
+  try {
+    const text = fs.readFileSync(ref.file, "utf8");
+    return { file: ref.file, ...sourceOfNode(text, node) };
+  } catch (_) {
+    return null;
+  }
+}
+
+/** dir/package.order に書かれた並び順。無ければ null。 */
+export function readPackageOrder(dir: string): string[] | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(dir, "package.order"), "utf8");
+  } catch (_) {
+    return null;
+  }
+  const names = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  return names.length ? names : null;
+}
+
+/** package.order の順に並べる。載っていないものは後ろへ名前順で置く。 */
+function applyPackageOrder(items: ChildItem[], order: string[]): ChildItem[] {
+  const rank = new Map<string, number>();
+  order.forEach((n, i) => {
+    if (!rank.has(n)) rank.set(n, i);
+  });
+  const listed: ChildItem[] = [];
+  const rest: ChildItem[] = [];
+  for (const it of items) (rank.has(it.name) ? listed : rest).push(it);
+  listed.sort((a, b) => rank.get(a.name)! - rank.get(b.name)!);
+  rest.sort((a, b) => a.name.localeCompare(b.name));
+  return [...listed, ...rest];
+}
+
 /**
  * パッケージ/クラス修飾名の子（サブパッケージ・クラス）一覧 [{name, kind}] を返す。
- * kind: "package" | "class"。
+ *
+ * 並び順:
+ *  - ディレクトリパッケージ … `package.order` の順。載っていないものは後ろに名前順。
+ *    `package.order` が無ければ名前順。
+ *  - 1 ファイル内のクラス   … そのファイルで**定義されている順**。
  */
 export function listPackageChildren(
   qname: string,
@@ -495,23 +970,27 @@ export function listPackageChildren(
         if (fs.existsSync(path.join(c.path, e.name, "package.mo")))
           items.push({ name: e.name, kind: "package" });
       } else if (e.isFile() && e.name.endsWith(".mo") && e.name !== "package.mo") {
-        items.push({ name: e.name.slice(0, -3), kind: "class" });
+        const file = path.join(c.path, e.name);
+        items.push({ name: e.name.slice(0, -3), kind: fileClassKind(file) });
       }
     }
     const pkgmo = path.join(c.path, "package.mo");
-    if (fs.existsSync(pkgmo)) {
-      const own = path.basename(c.path);
-      for (const n of listNestedClasses(fs.readFileSync(pkgmo, "utf8"), own))
-        items.push({ name: n, kind: "class" });
-    }
+    if (fs.existsSync(pkgmo))
+      for (const it of childrenInFile(pkgmo, path.basename(c.path), []))
+        items.push(it);
   } else {
-    const own = path.basename(c.path, ".mo");
-    for (const n of listNestedClasses(fs.readFileSync(c.path, "utf8"), own))
-      items.push({ name: n, kind: "class" });
+    const own = c.own || path.basename(c.path, ".mo");
+    for (const it of childrenInFile(c.path, own, c.nested || [])) items.push(it);
   }
   const map = new Map<string, ChildItem>();
   for (const it of items) if (!map.has(it.name)) map.set(it.name, it);
-  return [...map.values()];
+  const uniq = [...map.values()];
+  // ファイル内のクラスは定義順（parseClassTree の順）をそのまま活かす。
+  if (c.type !== "dir") return uniq;
+  const order = readPackageOrder(c.path);
+  return order
+    ? applyPackageOrder(uniq, order)
+    : uniq.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // =====================================================================

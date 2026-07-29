@@ -14,6 +14,19 @@ const TreeItemBase: typeof vscodeTypes.TreeItem =
   (vscode && vscode.TreeItem) ||
   (class {} as unknown as typeof vscodeTypes.TreeItem);
 
+// Modelica のクラス種別 → codicon 名。ツリーのアイコンをクラスタイプ別に描き分ける。
+const KIND_ICON: Record<ClassKind, string> = {
+  package: "package",
+  model: "symbol-class",
+  block: "symbol-interface",
+  record: "symbol-structure",
+  connector: "plug",
+  type: "symbol-ruler",
+  function: "symbol-function",
+  operator: "symbol-operator",
+  class: "symbol-misc",
+};
+
 /** ModelicaTreeNode の生成引数。 */
 export interface ModelicaTreeNodeInit {
   label: string;
@@ -38,12 +51,10 @@ export class ModelicaTreeNode extends TreeItemBase {
     this.id = qname;
     this.qname = qname;
     this.kind = kind;
-    this.tooltip = qname;
-    this.description = kind === "package" ? "package" : "";
+    this.tooltip = `${kind} ${qname}`;
+    this.description = kind;
     this.contextValue = `modelica.${kind}`;
-    this.iconPath = new vscode.ThemeIcon(
-      kind === "package" ? "package" : "symbol-class"
-    );
+    this.iconPath = new vscode.ThemeIcon(KIND_ICON[kind] || "symbol-misc");
     this.command = {
       command: "modelica.packageTree.open",
       title: "Open Modelica Class",
@@ -139,12 +150,11 @@ export class ModelicaTreeProvider
     }
   }
 
-  /** qname 直下の子（名前順）。 */
+  /** qname 直下の子。並び順は symbols 側（package.order / 定義順）に従う。 */
   private _children(qname: string, rootMap: RootMap): ChildItem[] {
     const cached = this._childCache.get(qname);
     if (cached) return cached;
     const items = symbols.listPackageChildren(qname, rootMap);
-    items.sort((a, b) => a.name.localeCompare(b.name));
     this._childCache.set(qname, items);
     return items;
   }
@@ -163,7 +173,76 @@ export class ModelicaTreeProvider
   }
 }
 
-/** ノードの定義位置を開く。ネストクラスは定義行へジャンプする。 */
+/** 行全体を覆う Selection（手動折りたたみ範囲の指定用）。 */
+function lineSpan(
+  doc: vscodeTypes.TextDocument,
+  from: number,
+  to: number
+): vscodeTypes.Selection {
+  const last = Math.min(to, doc.lineCount - 1);
+  return new vscode.Selection(from, 0, last, doc.lineAt(last).text.length);
+}
+
+/**
+ * エディタを「startLine〜endLine の定義だけ」の表示にする。
+ *
+ * VS Code には任意の行を隠す API が無いため、手動折りたたみ範囲
+ * （editor.createFoldingRangeFromSelection）で定義の前後を畳む。折りたたみは
+ * 常に先頭行が残る仕様なので、後半は endLine 自身から畳んで余計な行を見せない。
+ * 言語の既定の折りたたみ（FoldingRangeProvider / インデント）は壊さない。
+ */
+async function focusRange(
+  editor: vscodeTypes.TextEditor,
+  startLine: number,
+  endLine: number
+): Promise<void> {
+  const doc = editor.document;
+  const last = doc.lineCount - 1;
+  const saved = editor.selection;
+  try {
+    // 前回のフォーカス表示を解除してから畳み直す。
+    editor.selection = lineSpan(doc, 0, last);
+    await vscode.commands.executeCommand("editor.removeManualFoldingRanges");
+    await vscode.commands.executeCommand("editor.unfoldAll");
+    if (endLine < last) {
+      editor.selection = lineSpan(doc, endLine, last);
+      await vscode.commands.executeCommand(
+        "editor.createFoldingRangeFromSelection"
+      );
+    }
+    // 先頭行は畳んでも残るため、2 行以上あるときだけ畳む。
+    if (startLine >= 2) {
+      editor.selection = lineSpan(doc, 0, startLine - 1);
+      await vscode.commands.executeCommand(
+        "editor.createFoldingRangeFromSelection"
+      );
+    }
+  } catch (_) {
+    // 折りたたみに失敗しても、行へのジャンプまでは成立させる。
+    editor.selection = saved;
+  }
+}
+
+/** フォーカス表示（手動折りたたみ）を解除して全体を戻す。 */
+export async function clearFocus(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+  const doc = editor.document;
+  const saved = editor.selection;
+  try {
+    editor.selection = lineSpan(doc, 0, doc.lineCount - 1);
+    await vscode.commands.executeCommand("editor.removeManualFoldingRanges");
+    await vscode.commands.executeCommand("editor.unfoldAll");
+  } finally {
+    editor.selection = saved;
+    editor.revealRange(saved, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  }
+}
+
+/**
+ * ノードの定義位置を開く。ネストクラスは定義行へジャンプし、
+ * 設定 modelica.tree.focusDefinition が有効なら定義だけを残して前後を折りたたむ。
+ */
 export async function openNode(
   node: ModelicaTreeNode | undefined,
   rootMap: RootMap
@@ -178,7 +257,17 @@ export async function openNode(
   }
   const doc = await vscode.workspace.openTextDocument(loc.file);
   const pos = new vscode.Position(loc.line, loc.character);
-  await vscode.window.showTextDocument(doc, {
+  const editor = await vscode.window.showTextDocument(doc, {
     selection: new vscode.Range(pos, pos),
   });
+  const focus = vscode.workspace
+    .getConfiguration("modelica")
+    .get<boolean>("tree.focusDefinition", true);
+  if (focus && typeof loc.endLine === "number")
+    await focusRange(editor, loc.line, loc.endLine);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(
+    new vscode.Range(pos, pos),
+    vscode.TextEditorRevealType.AtTop
+  );
 }

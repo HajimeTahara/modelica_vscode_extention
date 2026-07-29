@@ -2,3 +2,7 @@
 	path = ref/ModelicaStandardLibrary
 	url = https://github.com/modelica/ModelicaStandardLibrary.git
 	branch = maint/4.1.x
+[submodule "ref/Orbis"]
+	path = ref/Orbis
+	url = https://github.com/HajimeTahara/Orbis.git
+	branch = main

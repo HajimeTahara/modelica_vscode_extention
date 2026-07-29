@@ -2,7 +2,7 @@
   "name": "modelica-vscode",
   "displayName": "Modelica Language",
   "description": "Modelica 言語のシンタックスハイライトと言語サポート（EAST ライブラリ開発用）",
-  "version": "0.15.1",
+  "version": "0.17.0",
   "publisher": "east",
   "license": "MIT",
   "engines": {
@@ -53,7 +53,7 @@
     "viewsWelcome": [
       {
         "view": "modelica.packageTree",
-        "contents": "ワークスペースに Modelica のクラス（.mo）が見つかりません。\nライブラリのフォルダを開くか、フォルダを右クリックして「Modelica 新規作成」から作成してください。\n[再読み込み](command:modelica.packageTree.refresh)"
+        "contents": "ワークスペースに Modelica のクラス（.mo）が見つかりません。\nライブラリのフォルダを開くか、このビューのタイトルバーの ＋（Modelica 新規作成）から作成してください。\n[パッケージを新規作成](command:modelica.newPackage)\n[再読み込み](command:modelica.packageTree.refresh)"
       }
     ],
     "languages": [
@@ -98,6 +98,11 @@
           "type": "integer",
           "default": 500,
           "description": "シミュレーションの出力区間数。"
+        },
+        "modelica.tree.focusDefinition": {
+          "type": "boolean",
+          "default": true,
+          "description": "パッケージツリーで選んだクラスを開くとき、その定義の前後を折りたたんで定義だけを表示する。折りたたみは「Modelica: 定義のフォーカス表示を解除」で戻せる。"
         }
       }
     },
@@ -178,22 +183,34 @@
         "title": "定義を開く",
         "category": "Modelica",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "modelica.packageTree.clearFocus",
+        "title": "定義のフォーカス表示を解除（折りたたみを戻す）",
+        "category": "Modelica",
+        "icon": "$(unfold)"
+      },
+      {
+        "command": "modelica.packageTree.copyModelicaPath",
+        "title": "Modelica パスをコピー",
+        "category": "Modelica",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "modelica.packageTree.copyFilePath",
+        "title": "ファイルパスをコピー",
+        "category": "Modelica",
+        "icon": "$(file-code)"
       }
     ],
     "submenus": [
       {
         "id": "modelica.newSubmenu",
-        "label": "Modelica 新規作成"
+        "label": "Modelica 新規作成",
+        "icon": "$(add)"
       }
     ],
     "menus": {
-      "explorer/context": [
-        {
-          "submenu": "modelica.newSubmenu",
-          "group": "navigation@30",
-          "when": "explorerResourceIsFolder"
-        }
-      ],
       "modelica.newSubmenu": [
         {
           "command": "modelica.newModel",
@@ -261,13 +278,23 @@
           "command": "modelica.showDiagram",
           "when": "resourceLangId == modelica",
           "group": "navigation@5"
+        },
+        {
+          "command": "modelica.packageTree.clearFocus",
+          "when": "resourceLangId == modelica && config.modelica.tree.focusDefinition",
+          "group": "navigation@6"
         }
       ],
       "view/title": [
         {
-          "command": "modelica.packageTree.refresh",
+          "submenu": "modelica.newSubmenu",
           "when": "view == modelica.packageTree",
           "group": "navigation@1"
+        },
+        {
+          "command": "modelica.packageTree.refresh",
+          "when": "view == modelica.packageTree",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -277,14 +304,29 @@
           "group": "navigation@1"
         },
         {
+          "submenu": "modelica.newSubmenu",
+          "when": "view == modelica.packageTree && viewItem == modelica.package",
+          "group": "1_new@1"
+        },
+        {
           "command": "modelica.showDocumentation",
-          "when": "view == modelica.packageTree && viewItem =~ /modelica\\.(package|class)/",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\./",
           "group": "modelica@2"
         },
         {
           "command": "modelica.showDiagram",
-          "when": "view == modelica.packageTree && viewItem =~ /modelica\\.class/",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\.(model|block|class|connector|record)/",
           "group": "modelica@3"
+        },
+        {
+          "command": "modelica.packageTree.copyModelicaPath",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\./",
+          "group": "9_copy@1"
+        },
+        {
+          "command": "modelica.packageTree.copyFilePath",
+          "when": "view == modelica.packageTree && viewItem =~ /modelica\\./",
+          "group": "9_copy@2"
         }
       ],
       "commandPalette": [
@@ -311,6 +353,18 @@
         {
           "command": "modelica.packageTree.open",
           "when": "false"
+        },
+        {
+          "command": "modelica.packageTree.copyModelicaPath",
+          "when": "false"
+        },
+        {
+          "command": "modelica.packageTree.copyFilePath",
+          "when": "false"
+        },
+        {
+          "command": "modelica.packageTree.clearFocus",
+          "when": "resourceLangId == modelica"
         }
       ]
     }
