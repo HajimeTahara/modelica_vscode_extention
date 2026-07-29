@@ -3,6 +3,6 @@
 **/*.map
 # TS ソースとビルド設定は配布物に不要（out/ の JS だけで動く）
 src/**/*.ts
-modelicaGraphics/**/*.ts
+modelicaGraphics/**
 tsconfig.json
 node_modules/**

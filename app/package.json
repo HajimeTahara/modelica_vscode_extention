@@ -1,10 +1,23 @@
 {
   "name": "modelica-vscode",
   "displayName": "Modelica Language",
-  "description": "Modelica 言語のシンタックスハイライトと言語サポート（EAST ライブラリ開発用）",
+  "description": "Modelica language editing extension for Visual Studio Code",
   "version": "0.19.0",
-  "publisher": "east",
+  "publisher": "HajimeTahara",
   "license": "MIT",
+  "icon": "resources/modelica-icon-lg.png",
+  "galleryBanner": {
+    "color": "#1F6F8B",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HajimeTahara/modelica_vscode_extention.git"
+  },
+  "homepage": "https://github.com/HajimeTahara/modelica_vscode_extention#readme",
+  "bugs": {
+    "url": "https://github.com/HajimeTahara/modelica_vscode_extention/issues"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -30,6 +43,7 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.5.0"
   },
   "contributes": {

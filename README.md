@@ -17,20 +17,22 @@ TypeScript 実装で**ランタイム依存パッケージなし**（ビルド�
 
 ```bat
 install.bat              REM インストール / 更新
+install.bat --package    REM VSIX 作成のみ
 install.bat --uninstall  REM アンインストール
 ```
 
 `install.bat` は次の順で処理する。Node.js（`npm`）が必要。
 
 1. `app/node_modules` が無ければ `npm install`
-2. `npm run rebuild`（`out/` を消してからコンパイル＝クリーンビルド）
-3. 既存の `east.modelica-vscode-*` を全削除
-4. `app/` を `%USERPROFILE%\.vscode\extensions\` へコピー（TS ソース・ビルド設定・
-   `node_modules` は除外し、実行に必要な `out/` とアセットだけ）
+2. ルート `LICENSE` を一時的に `app/LICENSE` としてコピー
+3. `app/` で `vsce package` を実行（`vscode:prepublish` により `npm run rebuild` も実行）
+4. `.vsix-build/east.modelica-vscode-<version>.vsix` を作成し、一時コピーした `app/LICENSE` を削除
+5. `code --install-extension <vsix> --force` で VSCode にインストール
 
-**ビルドが失敗した場合は 3 以降に進まない**ので、既にインストール済みの版はそのまま残る。
+**ビルドや VSIX 作成が失敗した場合はインストールに進まない**ので、既にインストール済みの版はそのまま残る。
 **実行後は VSCode を再起動**すると `.mo` ファイルに自動適用される。
-バージョンを上げても古いフォルダは残らない。
+同じバージョンでも `--force` で上書きインストールする。
+詳しい分岐と処理順は [docs/INSTALL_WORKFLOW.md](docs/INSTALL_WORKFLOW.md) にまとめている。
 
 開発時はリポジトリを VSCode で開き `F5`（拡張機能の開発ホスト）でも試せる。
 `F5` は起動前に `app/` のビルドを自動実行する。編集しながら試すなら
@@ -322,12 +324,15 @@ C:\Program Files\OpenModelica<バージョン>-64bit\bin
 
 ## 設定（Settings）
 
+詳細な用途と変更方法は [docs/SETTINGS.md](docs/SETTINGS.md) にまとめている。
+
 | 設定キー | 既定 | 説明 |
 |---|---|---|
 | `modelica.omcPath` | `omc` | omc 実行ファイルのパス |
 | `modelica.checkOnSave` | `false` | 保存時に自動で checkModel を実行 |
 | `modelica.simulation.stopTime` | `1.0` | Simulation Setup の Stop Time 初期値 |
 | `modelica.simulation.numberOfIntervals` | `500` | Simulation Setup の Number of Intervals 初期値 |
+| `modelica.tree.focusDefinition` | `true` | パッケージツリーから定義を開いたときに定義範囲へフォーカス表示 |
 
 ## キーボードショートカット早見表
 
@@ -367,7 +372,7 @@ modelica_vscode_extention/
 ├── install.bat                          # build → install / update / uninstall スクリプト
 ├── README.md / LICENSE / docs/
 ├── ref/ModelicaStandardLibrary/         # 参照用 MSL（git submodule）
-└── app/                                 # ← VSCode 拡張の実体（これがそのまま配布物になる）
+└── app/                                 # ← VSCode 拡張の実体
     ├── package.json                     # マニフェスト（言語/文法/コマンド/メニュー/設定）
     ├── tsconfig.json                    # TS ビルド設定（strict・out/ へ出力）
     ├── language-configuration.json      # 括弧/コメント/インデント設定
@@ -398,7 +403,7 @@ modelica_vscode_extention/
 
 ```bat
 cd app
-npm install          REM 初回のみ（typescript / @types のみ）
+npm install          REM 初回のみ（typescript / @types / vsce など）
 npm run compile      REM out/ へコンパイル（差分）
 npm run rebuild      REM out/ を消してからコンパイル（install.bat が使う）
 npm run clean        REM out/ を消すだけ
@@ -407,7 +412,7 @@ npm run typecheck    REM 型検査のみ（出力なし）
 ```
 
 普段の開発は `compile` / `watch` でよい。`tsc` はソースをリネーム・削除しても `out/` の
-古い `.js` を消さないため、配布物を作る `install.bat` は必ず `rebuild` を使う。
+古い `.js` を消さないため、VSIX 作成時は `vscode:prepublish` 経由で必ず `rebuild` を使う。
 
 `package.json` の `main` は `./out/src/extension.js`。`rootDir` を `app/` にしているので
 `out/src/` と `out/modelicaGraphics/` の相対関係がソースと同じになり、

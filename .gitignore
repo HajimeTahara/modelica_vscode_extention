@@ -1,6 +1,5 @@
-# ref/ は ModelicaStandardLibrary サブモジュールを配置するため追跡対象とする
-
-# TypeScript のビルド成果物と依存
 app/out/
 app/node_modules/
 app/*.tsbuildinfo
+.vsix-build/
+.modelica-build/
