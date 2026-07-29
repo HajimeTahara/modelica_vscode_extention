@@ -1530,12 +1530,11 @@ async function showDocumentation(target: ClassTarget | null): Promise<void> {
  * こうすると拡大しても線が太らず、目盛りも常に一定の見かけで描ける。
  *
  * 配色は Orbis のダイアグラムビューに合わせる（キャンバスは白・外側は淡い青）。
- * Modelica のアイコンは白背景前提で色が付いているため、VS Code のテーマ色を
- * 敷くと黒い線画が沈む。ヘッダなど枠まわりだけテーマに追従させる。
+ * Modelica のアイコンは白背景前提で色が付いているため、VS Code のテーマ色は敷かない
+ * （黒い線画が沈む）。クラス名は Webview パネルのタイトルに出るので本文には置かない。
  */
 function getDiagramHtml(
   webview: vscodeTypes.Webview,
-  className: string,
   diagram: DiagramSvgResult
 ): string {
   const nonce = getNonce();
@@ -1549,24 +1548,16 @@ function getDiagramHtml(
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
   html, body { height: 100%; margin: 0; }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
-    display: flex; flex-direction: column; background: var(--vscode-editor-background); }
-  .cls { padding: 6px 12px; color: var(--vscode-descriptionForeground);
-    font-family: var(--vscode-editor-font-family);
-    border-bottom: 1px solid var(--vscode-panel-border, #8884);
-    background: var(--vscode-editor-background); }
+  body { display: flex; flex-direction: column; }
   .canvas { flex: 1; overflow: hidden; position: relative; cursor: grab;
     background: rgb(233,241,251); }
   .canvas.panning { cursor: grabbing; }
   .canvas > svg { position: absolute; inset: 0; width: 100%; height: 100%;
     touch-action: none; user-select: none; }
-  .hint { position: absolute; right: 8px; bottom: 6px; font-size: 11px;
-    color: rgb(100,116,139); pointer-events: none; }
 </style>
 </head>
 <body>
-  <div class="cls">${className} — Diagram</div>
-  <div class="canvas" id="canvas">${diagram.svg}<div class="hint">ドラッグ: パン ／ ホイール: ズーム ／ ダブルクリック: リセット</div></div>
+  <div class="canvas" id="canvas">${diagram.svg}</div>
 <script nonce="${nonce}">
   const base = ${view};
   const canvasRect = ${canvas};
@@ -1805,11 +1796,7 @@ async function showDiagram(target: ClassTarget | null): Promise<void> {
     });
   }
   diagramPanel.title = `Diagram: ${className || ""}`.trim();
-  diagramPanel.webview.html = getDiagramHtml(
-    diagramPanel.webview,
-    className || "",
-    diagram
-  );
+  diagramPanel.webview.html = getDiagramHtml(diagramPanel.webview, diagram);
   diagramPanel.reveal(vscode.ViewColumn.Beside, true);
 }
 

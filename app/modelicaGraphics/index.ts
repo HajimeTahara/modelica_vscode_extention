@@ -50,6 +50,7 @@ export {
   extractExtendsTypeNames,
   sliceNamedClass,
   isConnectorLikeType,
+  isConnectorClass,
 } from "./src/layers";
 export type { PlacementLayer } from "./src/layers";
 

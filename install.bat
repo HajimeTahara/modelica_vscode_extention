@@ -18,7 +18,7 @@ set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "SRC=%ROOT%\app"
 REM Keep in sync with app\package.json "version".
-set "NAME=east.modelica-vscode-0.18.0"
+set "NAME=east.modelica-vscode-0.18.1"
 set "EXTDIR=%USERPROFILE%\.vscode\extensions"
 set "DEST=%EXTDIR%\%NAME%"
 set "ROBOCOPY=%SystemRoot%\System32\robocopy.exe"

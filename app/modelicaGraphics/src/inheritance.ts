@@ -5,6 +5,8 @@
 
 import {
   extractExtendsTypeNames,
+  isConnectorClass,
+  isConnectorLikeType,
   parseIconComponents,
   parseOwnIconGraphics,
   sliceNamedClass,
@@ -81,6 +83,10 @@ export interface ScopedIconComponent {
 /**
  * ownSource と継承元を辿り、アイコンに配置されたポート（コネクタ）を集める。
  * 同名は派生側（より末端）を優先する。
+ *
+ * アイコンに描くのはコネクタだけ。型を解決して見出しが `connector` かどうかで
+ * 判定するので、`Frame_a` のような名前でも拾え、`Add addD if with_D` のような
+ * 条件付きの内部ブロックは除ける。解決できない型だけ名前の慣習で判定する。
  */
 export function collectInheritedIconComponents(
   ownSource: string,
@@ -89,10 +95,9 @@ export function collectInheritedIconComponents(
   visited: Set<string> = new Set(),
   depth = 0
 ): ScopedIconComponent[] {
-  const own = parseIconComponents(ownSource).map((component) => ({
-    component,
-    scope: scopeClassName,
-  }));
+  const own = parseIconComponents(ownSource)
+    .filter((component) => isConnectorType(component.typeName, scopeClassName, resolve))
+    .map((component) => ({ component, scope: scopeClassName }));
   if (depth >= MAX_DEPTH) return own;
 
   const inherited: ScopedIconComponent[] = [];
@@ -118,6 +123,17 @@ export function collectInheritedIconComponents(
   for (const item of inherited) byName.set(item.component.name, item);
   for (const item of own) byName.set(item.component.name, item);
   return [...byName.values()];
+}
+
+/** 型名がコネクタを指すか。解決できたら見出しキーワード、駄目なら名前の慣習で判定する。 */
+function isConnectorType(
+  typeName: string,
+  scopeClassName: string,
+  resolve: ClassTextResolver
+): boolean {
+  const resolved = resolveQuietly(resolve, typeName, scopeClassName);
+  if (!resolved) return isConnectorLikeType(typeName);
+  return isConnectorClass(narrowToClass(resolved.text, resolved.className));
 }
 
 function resolveQuietly(

@@ -556,10 +556,29 @@ const KEYWORD_PREFIXES: ReadonlySet<string> = new Set([
 /** 配置を読むレイヤ。icon は iconTransformation を優先する。 */
 export type PlacementLayer = "diagram" | "icon";
 
-/** 型名がコネクタらしい（ポートとして扱ってよい）か。 */
+/**
+ * 型名がコネクタらしいか。型を解決できないときの**フォールバック**判定で、
+ * 本来は isConnectorClass（実際の見出しキーワード）で判定する。
+ * MSL のコネクタは `Frame_a` / `Flange_b` / `HeatPorts_a` のように接尾辞が付くため、
+ * 複数形の `s` と `_〜` を許す。
+ */
 export function isConnectorLikeType(typeName: string): boolean {
   const leaf = typeName.split(".").at(-1) ?? typeName;
-  return /(Input|Output|Port|Pin|Plug|Socket|Flange|Frame|Support|Axis)$/i.test(leaf);
+  return /(Input|Output|Port|Pin|Plug|Socket|Flange|Frame|Support|Axis)s?(_\w+)?$/i.test(
+    leaf
+  );
+}
+
+/** クラス本文の見出しが `connector`（`expandable connector` を含む）か。 */
+export function isConnectorClass(source: string): boolean {
+  const re =
+    /\b(expandable\s+connector|connector|model|block|class|record|package|type|function|operator)\s+[A-Za-z_]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    if (!isCodePosition(source, m.index)) continue;
+    return (m[1] ?? "").includes("connector");
+  }
+  return false;
 }
 
 function findTopLevelKeyword(source: string, keyword: string): number {
@@ -840,17 +859,6 @@ function extractComponents(
 
     const declaration = componentDeclaration(statement);
     if (!declaration) continue;
-    // アイコンレイヤでは iconTransformation を優先するが、MSL には conditional
-    // connector で transformation だけを持つ宣言もある。コネクタらしい型、または
-    // `if ...` 付き配置は transformation を icon 表示のフォールバックとして使う。
-    if (
-      layer === "icon" &&
-      !/\biconTransformation\b/.test(statement) &&
-      !declaration.condition &&
-      !isConnectorLikeType(declaration.typeName)
-    ) {
-      continue;
-    }
 
     const transform = parseTransformation(statement, layer);
     if (!transform) continue;
@@ -869,8 +877,14 @@ function extractComponents(
 }
 
 /**
- * アイコンビューに表示すべき配置済みコンポーネント（コネクタ等、
- * iconTransformation を持つ宣言）を抽出する。座標はアイコン座標系。
+ * アイコン座標系での配置を持つ宣言を抽出する（`iconTransformation` があればそれ、
+ * 無ければ `transformation` を使う。Modelica では iconTransformation の既定が
+ * transformation なので、これが仕様どおりの解釈）。
+ *
+ * アイコンに描いてよいのはコネクタだけだが、それは型を解決しないと分からない。
+ * ここでは絞り込まず、コネクタかどうかの判定は inheritance.ts 側で行う
+ * （型名だけで決めると `Frame_a` を取りこぼしたり、条件付きの内部ブロックを
+ * ポートと誤認したりする）。
  */
 export function parseIconComponents(source: string): DiagramComponent[] {
   return extractComponents(source, "icon");
