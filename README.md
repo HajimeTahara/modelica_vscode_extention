@@ -173,16 +173,39 @@ Documentation が無いモデルではその旨を通知する。
 - 相対的に書かれた型名（`Sources.Sine` など）は、対象クラスを囲むパッケージを内側から
   順に補って解決する。
 - 各コンポーネントを型の**Icon 図形**（Line/Rectangle/Ellipse/Polygon/Text）で描画し、`Placement`
-  （origin / extent / rotation）どおりに配置する。Icon は `extends` を辿って基底クラスから収集し、
-  `%name` はコンポーネント名に置換する。Icon が無い型は名前付きボックスにフォールバック。
+  （origin / extent / rotation）どおりに配置する。Icon は `extends` を辿って基底クラスから収集し
+  （基底が下・派生が上）、`%name` はコンポーネント名に置換する。Icon が無い型は名前と型名を書いた
+  ボックスにフォールバック。
+- **ポート（コネクタ）も描く**。型の Icon に置かれた `RealInput` / `Flange_a` / `Pin` などを
+  継承込みで集め、それぞれのアイコンで本体の上に重ねる。
+- 図形の属性を Modelica の指定どおりに反映する。
+  - `fillPattern` … Solid のほか、ハッチング（Horizontal/Vertical/Cross/Forward/Backward/CrossDiag）と
+    グラデーション（HorizontalCylinder/VerticalCylinder/Sphere）。
+  - `pattern` … Dash / Dot / DashDot / DashDotDot の線種。`radius`（角丸）、`borderPattern`。
+  - `Line` の `arrow`（Filled/Open/Half）・`arrowSize`、`smooth=Bezier`（Line/Polygon）。
+  - `Text` の `fontSize`（0 は枠に合わせて自動）・`fontName`・`textStyle`（Bold/Italic/UnderLine）・
+    `horizontalAlignment`・改行。反転配置（extent の符号反転）でも文字は正立させる。
+  - `visible=false` の図形は描かない。
+- `annotation(Diagram(graphics=…))` に直接書かれた図形（枠・注記など）も描画する。
+- `Foo x if cond` の**条件付きコンポーネント**は、Boolean パラメータの既定値から条件が false と
+  分かる場合に薄く表示する。
 - `connect(...)` の `Line(points=…, color=…)` を**接続線**として描画（信号=青・熱=赤など元の色）。
-- `Diagram(coordinateSystem(extent=…))` を座標系に採用。Modelica の Y 上向きは SVG 用に反転する。
+  マウスを乗せると接続元/先が出る。
+- `Diagram(coordinateSystem(extent=…))` を座標系（キャンバス）として白く敷き、Orbis と同じ
+  1/2/5×10ⁿ の目盛りを重ねる。Modelica の Y 上向きは SVG 用に反転する。
   - 指定が無いモデルは既定の `{{-100,-100},{100,100}}`。座標系の外に置かれた
-    コンポーネント/接続線があれば、そこまで表示範囲を自動で広げる（見切れを防ぐ）。
+    コンポーネント/接続線/図形があれば、そこまで表示範囲を自動で広げる（見切れを防ぐ）。
+  - Modelica のアイコンは白背景前提で色が付いているため、キャンバスは VS Code のテーマに
+    追従させず常に白。ヘッダなど枠まわりはテーマ色を使う。
 - **パン/ズーム** — ドラッグでパン、ホイールでカーソル基点のズーム、ダブルクリックでリセット。
+  viewBox を書き換えて拡大するので、拡大しても線の太さと目盛りの見かけは変わらない。
 
 グラフィック解析/描画は同梱ライブラリ **`app/modelicaGraphics/`**（vscode 非依存・依存ゼロ）に
-切り出している。
+切り出している。解析・描画のモデルは別プロジェクト **Orbis**（`ref/Orbis`）の
+`app/src/features/modelica-browser` から移植したもので、型定義（`types.ts`）・annotation パーサ
+（`annotation.ts`）・レイヤ抽出（`layers.ts`）・継承解決（`inheritance.ts`）・SVG 描画
+（`render.ts`）に分かれている。Orbis 側は React コンポーネントで編集機能も持つが、この拡張は
+表示専用のため描画を SVG 文字列生成へ置き換えている。
 
 ## annotation の表示/非表示
 

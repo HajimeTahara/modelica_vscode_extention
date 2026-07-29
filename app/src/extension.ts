@@ -17,7 +17,13 @@ import * as symbols from "./symbols";
 import * as graphics from "./graphics";
 import * as modelicaTree from "./modelicaTree";
 import type { RootMap } from "./symbols";
-import type { CoordExtent, IconDef, Placement, Point } from "./graphics";
+import type {
+  ClassTextResolver,
+  DiagramSvgResult,
+  GraphicsLayer,
+  IconMap,
+  NodeIcon,
+} from "./graphics";
 
 const { isValidIdent, qualifiedName, findLibraryRoot, classNameForFile } = util;
 
@@ -1518,12 +1524,23 @@ async function showDocumentation(target: ClassTarget | null): Promise<void> {
 // Diagram View（Webview・SVG）
 // =====================================================================
 
+/**
+ * ダイアグラム Webview の HTML。パン/ズームは（CSS 変形ではなく）viewBox の
+ * 書き換えで行う。SVG 側の線幅は vector-effect="non-scaling-stroke" なので、
+ * こうすると拡大しても線が太らず、目盛りも常に一定の見かけで描ける。
+ *
+ * 配色は Orbis のダイアグラムビューに合わせる（キャンバスは白・外側は淡い青）。
+ * Modelica のアイコンは白背景前提で色が付いているため、VS Code のテーマ色を
+ * 敷くと黒い線画が沈む。ヘッダなど枠まわりだけテーマに追従させる。
+ */
 function getDiagramHtml(
   webview: vscodeTypes.Webview,
   className: string,
-  svg: string
+  diagram: DiagramSvgResult
 ): string {
   const nonce = getNonce();
+  const view = JSON.stringify(diagram.viewBox);
+  const canvas = JSON.stringify(diagram.canvas);
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -1533,49 +1550,136 @@ function getDiagramHtml(
 <style>
   html, body { height: 100%; margin: 0; }
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
-    display: flex; flex-direction: column;
-    background:
-      linear-gradient(var(--vscode-panel-border, #8882) 1px, transparent 1px) 0 0 / 20px 20px,
-      linear-gradient(90deg, var(--vscode-panel-border, #8882) 1px, transparent 1px) 0 0 / 20px 20px,
-      var(--vscode-editor-background); }
+    display: flex; flex-direction: column; background: var(--vscode-editor-background); }
   .cls { padding: 6px 12px; color: var(--vscode-descriptionForeground);
-    font-family: var(--vscode-editor-font-family); border-bottom: 1px solid var(--vscode-panel-border, #8884);
+    font-family: var(--vscode-editor-font-family);
+    border-bottom: 1px solid var(--vscode-panel-border, #8884);
     background: var(--vscode-editor-background); }
-  .canvas { flex: 1; overflow: hidden; position: relative; cursor: grab; }
+  .canvas { flex: 1; overflow: hidden; position: relative; cursor: grab;
+    background: rgb(233,241,251); }
   .canvas.panning { cursor: grabbing; }
-  .canvas > svg { position: absolute; top: 0; left: 0; width: 100%; height: auto;
-    max-width: none; max-height: none; transform-origin: 0 0; }
+  .canvas > svg { position: absolute; inset: 0; width: 100%; height: 100%;
+    touch-action: none; user-select: none; }
   .hint { position: absolute; right: 8px; bottom: 6px; font-size: 11px;
-    color: var(--vscode-descriptionForeground); opacity: 0.75; pointer-events: none; }
+    color: rgb(100,116,139); pointer-events: none; }
 </style>
 </head>
 <body>
   <div class="cls">${className} — Diagram</div>
-  <div class="canvas" id="canvas">${svg}<div class="hint">ドラッグ: パン ／ ホイール: ズーム ／ ダブルクリック: リセット</div></div>
+  <div class="canvas" id="canvas">${diagram.svg}<div class="hint">ドラッグ: パン ／ ホイール: ズーム ／ ダブルクリック: リセット</div></div>
 <script nonce="${nonce}">
-  const canvas = document.getElementById('canvas');
-  const svg = canvas.querySelector('svg');
-  let scale = 1, tx = 0, ty = 0, panning = false, sx = 0, sy = 0;
-  function apply() { svg.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')'; }
-  canvas.addEventListener('wheel', (e) => {
+  const base = ${view};
+  const canvasRect = ${canvas};
+  const host = document.getElementById('canvas');
+  const svg = host.querySelector('svg');
+  const gridGroup = svg.querySelector('#mg-grid');
+  let view = Object.assign({}, base);
+  let panning = false, startX = 0, startY = 0, startView = null;
+
+  // 1/2/5×10^n から見やすい目盛り間隔を選ぶ（Orbis の defaultGridStep と同じ）。
+  function niceStep(raw) {
+    if (!(raw > 0)) return 10;
+    const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / pow;
+    return (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * pow;
+  }
+  const step = niceStep(Math.max(canvasRect.width, canvasRect.height) / 20);
+  const major = step * 5;
+
+  function line(x1, y1, x2, y2, stroke, width) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    el.setAttribute('x1', x1); el.setAttribute('y1', y1);
+    el.setAttribute('x2', x2); el.setAttribute('y2', y2);
+    el.setAttribute('stroke', stroke); el.setAttribute('stroke-width', width);
+    el.setAttribute('vector-effect', 'non-scaling-stroke');
+    return el;
+  }
+
+  // 表示中の範囲だけ目盛りを引く。詰まりすぎる間隔は間引く。
+  function drawGrid() {
+    while (gridGroup.firstChild) gridGroup.removeChild(gridGroup.firstChild);
+    const pxPerUnit = host.clientWidth / view.width;
+    const left = view.x, right = view.x + view.width;
+    const top = view.y, bottom = view.y + view.height;
+    const showMinor = step * pxPerUnit >= 6;
+    const showMajor = major * pxPerUnit >= 6;
+    const frag = document.createDocumentFragment();
+    const MAX = 4000;
+    const isMajor = (v) => Math.abs(v / major - Math.round(v / major)) < 1e-6;
+    if (showMinor || showMajor) {
+      for (let x = Math.ceil(left / step) * step, i = 0; x <= right && i < MAX; x += step, i++) {
+        const m = isMajor(x);
+        if (m ? showMajor : showMinor) {
+          frag.appendChild(line(x, top, x, bottom, m ? 'rgb(168,190,219)' : 'rgb(206,219,238)', 1));
+        }
+      }
+      for (let y = Math.ceil(top / step) * step, i = 0; y <= bottom && i < MAX; y += step, i++) {
+        const m = isMajor(y);
+        if (m ? showMajor : showMinor) {
+          frag.appendChild(line(left, y, right, y, m ? 'rgb(168,190,219)' : 'rgb(206,219,238)', 1));
+        }
+      }
+    }
+    // 原点の中心線。
+    if (0 >= left && 0 <= right) frag.appendChild(line(0, top, 0, bottom, 'rgb(120,140,170)', 1.4));
+    if (0 >= top && 0 <= bottom) frag.appendChild(line(left, 0, right, 0, 'rgb(120,140,170)', 1.4));
+    gridGroup.appendChild(frag);
+  }
+
+  function apply() {
+    svg.setAttribute('viewBox', view.x + ' ' + view.y + ' ' + view.width + ' ' + view.height);
+    drawGrid();
+  }
+
+  // preserveAspectRatio="xMidYMid meet" による余白を考慮して、
+  // クライアント座標を viewBox 座標へ変換する。
+  function toView(clientX, clientY) {
+    const r = host.getBoundingClientRect();
+    const scale = Math.min(r.width / view.width, r.height / view.height);
+    const offX = (r.width - view.width * scale) / 2;
+    const offY = (r.height - view.height * scale) / 2;
+    return {
+      x: view.x + (clientX - r.left - offX) / scale,
+      y: view.y + (clientY - r.top - offY) / scale,
+      scale: scale,
+    };
+  }
+
+  host.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    tx = mx - (mx - tx) * factor;
-    ty = my - (my - ty) * factor;
-    scale *= factor;
+    const p = toView(e.clientX, e.clientY);
+    const factor = e.deltaY < 0 ? 1 / 1.1 : 1.1; // viewBox を縮めると拡大
+    view = {
+      x: p.x - (p.x - view.x) * factor,
+      y: p.y - (p.y - view.y) * factor,
+      width: view.width * factor,
+      height: view.height * factor,
+    };
     apply();
   }, { passive: false });
-  canvas.addEventListener('mousedown', (e) => {
-    panning = true; sx = e.clientX - tx; sy = e.clientY - ty;
-    canvas.classList.add('panning');
+
+  host.addEventListener('pointerdown', (e) => {
+    panning = true; startX = e.clientX; startY = e.clientY; startView = Object.assign({}, view);
+    host.classList.add('panning');
+    host.setPointerCapture(e.pointerId);
   });
-  window.addEventListener('mousemove', (e) => {
-    if (!panning) return; tx = e.clientX - sx; ty = e.clientY - sy; apply();
+  host.addEventListener('pointermove', (e) => {
+    if (!panning || !startView) return;
+    const r = host.getBoundingClientRect();
+    const scale = Math.min(r.width / startView.width, r.height / startView.height);
+    view = {
+      x: startView.x - (e.clientX - startX) / scale,
+      y: startView.y - (e.clientY - startY) / scale,
+      width: startView.width,
+      height: startView.height,
+    };
+    apply();
   });
-  window.addEventListener('mouseup', () => { panning = false; canvas.classList.remove('panning'); });
-  canvas.addEventListener('dblclick', () => { scale = 1; tx = 0; ty = 0; apply(); });
+  const endPan = () => { panning = false; startView = null; host.classList.remove('panning'); };
+  host.addEventListener('pointerup', endPan);
+  host.addEventListener('pointercancel', endPan);
+  host.addEventListener('dblclick', () => { view = Object.assign({}, base); apply(); });
+  window.addEventListener('resize', drawGrid);
   apply();
 </script>
 </body>
@@ -1583,34 +1687,69 @@ function getDiagramHtml(
 }
 
 /**
- * クラス qname の Icon 図形を extends を辿って収集する。
- * 基底クラスの graphics を先（下）に、派生クラスを後（上）に積む。
- * 返り値 {coord, graphics}。graphics が空なら Icon 無し。
+ * 型名を「宣言していたクラス（scope）」から解決し、そのクラス本文を返す resolver。
+ * modelicaGraphics の継承解決（buildInheritedIconLayer など）へ渡す。
+ * 解決結果はプロセス内でキャッシュする（MSL のような大きなライブラリでも
+ * 同じ型を何度も読み直さない）。
  */
-function collectIcon(
-  qname: string,
+function makeClassTextResolver(
   rootMap: RootMap,
-  seen: Set<string>
-): IconDef {
-  const merged: IconDef = { coord: null, graphics: [] };
-  if (seen.has(qname)) return merged;
-  seen.add(qname);
-  const src = symbols.readClassSource(qname, rootMap);
-  if (!src) return merged;
-  const scopes = typeScopes(qname, src.file);
-  for (const base of graphics.parseExtends(src.text)) {
-    const bq = resolveTypeName(base, scopes, rootMap);
-    if (!bq) continue;
-    const bi = collectIcon(bq, rootMap, seen);
-    if (bi.graphics.length) merged.graphics.push(...bi.graphics);
-    if (!merged.coord && bi.coord) merged.coord = bi.coord;
+  fallbackScopes: string[] = []
+): ClassTextResolver {
+  const cache = new Map<string, { text: string; className: string } | null>();
+  return (token, scopeClassName) => {
+    const key = `${scopeClassName}\u0000${token}`;
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+    // scope 自身（ネストクラス参照）から外側パッケージへ向かって試し、最後に
+    // 呼び出し元のフォールバック（ファイルの所属パッケージ）を見る。
+    const segs = scopeClassName.split(".").filter(Boolean);
+    const scopes: string[] = [];
+    for (let i = segs.length; i >= 1; i--) scopes.push(segs.slice(0, i).join("."));
+    for (const s of fallbackScopes) if (!scopes.includes(s)) scopes.push(s);
+    const qname = resolveTypeName(token, scopes, rootMap);
+    const src = qname ? symbols.readClassSource(qname, rootMap) : null;
+    const result =
+      src && qname ? { text: src.text, className: qname } : null;
+    cache.set(key, result);
+    return result;
+  };
+}
+
+/**
+ * コンポーネント型 1 つ分のアイコンを解決する。
+ * base は extends を辿って合成した図形、ports はそのクラスの Icon に配置された
+ * コネクタ（それぞれ自身のアイコンを解決済み）。どちらも空なら null。
+ */
+function resolveNodeIcon(
+  typeName: string,
+  scopeClassName: string,
+  resolve: ClassTextResolver
+): NodeIcon | null {
+  const resolved = resolve(typeName, scopeClassName);
+  if (!resolved) return null;
+  const base = graphics.buildInheritedIconLayer(
+    resolved.text,
+    resolved.className,
+    resolve
+  );
+  // input/output などのポート（コネクタ）を継承込みで集めて解決する。
+  const ports: NodeIcon["ports"] = [];
+  for (const { component, scope } of graphics.collectInheritedIconComponents(
+    resolved.text,
+    resolved.className,
+    resolve
+  )) {
+    const portType = resolve(component.typeName, scope);
+    if (!portType) continue;
+    const icon: GraphicsLayer = graphics.buildInheritedIconLayer(
+      portType.text,
+      portType.className,
+      resolve
+    );
+    if (icon.primitives.length) ports.push({ component, icon });
   }
-  const own = graphics.parseIcon(src.text);
-  if (own) {
-    if (own.graphics.length) merged.graphics.push(...own.graphics);
-    if (own.coord) merged.coord = own.coord;
-  }
-  return merged;
+  return base.primitives.length || ports.length ? { base, ports } : null;
 }
 
 async function showDiagram(target: ClassTarget | null): Promise<void> {
@@ -1627,73 +1766,32 @@ async function showDiagram(target: ClassTarget | null): Promise<void> {
     );
     return;
   }
-  const text = target.text;
-  const comps = symbols.parseComponents(text);
-  const placements = graphics.parseComponentPlacements(text, comps);
-  const connections = graphics.parseConnections(text);
-  if (!placements.length && !connections.length) {
+  const layer = graphics.parseDiagramLayer(target.text);
+  if (!layer.components.length && !layer.connections.length && !layer.primitives.length) {
     vscode.window.showInformationMessage(
       `Modelica: ${className || "このモデル"} に図示できるコンポーネント/接続がありません。`
     );
     return;
   }
-  const extent = graphics.parseDiagramExtent(text);
 
-  // 各コンポーネント型の Icon 図形（extends 継承込み）を解決・キャッシュ
-  const rootMap = await getRootMap();
-  const scopes = typeScopes(className, target.file);
-  const iconCache = new Map<string, IconDef | null>();
-  const iconForType = (type: string): IconDef | null => {
-    const cached = iconCache.get(type);
-    if (cached !== undefined) return cached;
-    let icon: IconDef | null = null;
-    const q = resolveTypeName(type, scopes, rootMap);
-    if (q) {
-      const merged = collectIcon(q, rootMap, new Set<string>());
-      if (merged.graphics.length) {
-        if (!merged.coord) {
-          const def: CoordExtent = { xmin: -100, ymin: -100, xmax: 100, ymax: 100 };
-          merged.coord = def;
-        }
-        icon = merged;
-      }
+  // 各コンポーネント型のアイコン（extends 継承・ポート込み）を解決する。
+  const resolve = makeClassTextResolver(
+    await getRootMap(),
+    typeScopes(className, target.file)
+  );
+  const byType = new Map<string, NodeIcon | null>();
+  const icons: IconMap = new Map();
+  for (const component of layer.components) {
+    const key = component.typeName;
+    let node = byType.get(key);
+    if (node === undefined) {
+      node = resolveNodeIcon(key, className, resolve);
+      byType.set(key, node);
     }
-    iconCache.set(type, icon);
-    return icon;
-  };
+    icons.set(component.name, node);
+  }
 
-  const renderComponent = (c: Placement): string | null => {
-    const icon = iconForType(c.type);
-    if (!icon) return null; // 名前付きボックスにフォールバック
-    const [[e1x, e1y], [e2x, e2y]] = c.extent;
-    const x1 = c.origin[0] + e1x;
-    const y1 = c.origin[1] + e1y;
-    const x2 = c.origin[0] + e2x;
-    const y2 = c.origin[1] + e2y;
-    const box = {
-      xlo: Math.min(x1, x2),
-      xhi: Math.max(x1, x2),
-      ylo: Math.min(y1, y2),
-      yhi: Math.max(y1, y2),
-    };
-    const tf = (x: number, y: number): Point => [x, -y]; // Modelica 図面座標 → SVG（Y 反転）
-    const frag = graphics.renderIcon(icon, box, tf, { name: c.name });
-    if (!frag) return null;
-    const rot =
-      c.rotation && c.rotation !== 0
-        ? ` transform="rotate(${-c.rotation} ${c.origin[0]} ${-c.origin[1]})"`
-        : "";
-    const shortType = String(c.type).split(".").pop();
-    return `<g${rot}>${frag}<title>${c.name} : ${shortType}</title></g>`;
-  };
-
-  const svg = graphics.buildDiagramSvg(placements, connections, extent, {
-    renderComponent,
-    compFill:
-      "var(--vscode-editor-inactiveSelectionBackground, rgba(120,160,220,0.15))",
-    compStroke: "var(--vscode-focusBorder, #5a8fd6)",
-    textColor: "var(--vscode-editor-foreground, #ccc)",
-  });
+  const diagram = graphics.buildDiagramSvg(layer, icons);
 
   if (!diagramPanel) {
     diagramPanel = vscode.window.createWebviewPanel(
@@ -1710,7 +1808,7 @@ async function showDiagram(target: ClassTarget | null): Promise<void> {
   diagramPanel.webview.html = getDiagramHtml(
     diagramPanel.webview,
     className || "",
-    svg
+    diagram
   );
   diagramPanel.reveal(vscode.ViewColumn.Beside, true);
 }

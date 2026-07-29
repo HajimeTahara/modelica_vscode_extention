@@ -1,56 +1,80 @@
 // modelicaGraphics — Modelica のグラフィカルアノテーション解析と SVG 描画の共通パッケージ。
 // vscode 非依存・依存ゼロ。VS Code 拡張や他ツールから再利用する。
 // ビルドは拡張本体と同じ app/tsconfig.json が担当し、app/out/modelicaGraphics/ へ出力される。
+//
+// 解析・描画のモデルは Orbis（ref/Orbis）の modelica-browser 実装から移植している。
+// - types.ts       … Icon / Diagram の図形モデル（FillPattern / LinePattern / 矢印など）
+// - annotation.ts  … annotation 値パーサと call → プリミティブ変換
+// - layers.ts      … クラス本体の走査、Icon / Diagram レイヤ・配置・接続の抽出
+// - inheritance.ts … extends を辿った Icon 合成とポート収集
+// - render.ts      … プリミティブ / ダイアグラムの SVG 文字列描画
+
+export type {
+  Vec2,
+  Extent,
+  GraphicBase,
+  FillPattern,
+  LinePattern,
+  BorderPattern,
+  LinePrimitive,
+  RectanglePrimitive,
+  EllipsePrimitive,
+  PolygonPrimitive,
+  TextPrimitive,
+  GraphicPrimitive,
+  DiagramComponent,
+  DiagramConnection,
+  GraphicsLayer,
+  DiagramLayer,
+} from "./src/types";
+
+export { DEFAULT_EXTENT } from "./src/types";
 
 export {
-  // 低レベル解析
-  matchParen,
-  matchBracket,
-  parseNumberArray,
-  extractBraceValue,
-  // NumArray → 具体形
-  toPoint,
-  toPoints,
-  toExtent,
-  toRgb,
-} from "./src/parse";
-
-export type { NumArray, Point, Extent, Rgb, CoordExtent } from "./src/parse";
+  ValueParser,
+  asNum,
+  asStr,
+  asPoint,
+  asPoints,
+  asExtent,
+  asColor,
+  toPrimitive,
+} from "./src/annotation";
+export type { Node } from "./src/annotation";
 
 export {
-  // ダイアグラム（モデル構成）
-  parseDiagramExtent,
-  parseComponentPlacements,
-  parseConnections,
-  buildDiagramSvg,
+  parseOwnIconGraphics,
+  parseOwnDiagramGraphics,
+  parseDiagramLayer,
+  parseIconComponents,
+  extractExtendsTypeNames,
+  sliceNamedClass,
+  isConnectorLikeType,
+} from "./src/layers";
+export type { PlacementLayer } from "./src/layers";
+
+export {
+  buildInheritedIconLayer,
+  collectInheritedIconComponents,
+} from "./src/inheritance";
+export type { ClassTextResolver, ScopedIconComponent } from "./src/inheritance";
+
+export {
+  SELECT_COLOR,
   esc,
-  rgb,
-} from "./src/diagram";
-
+  normalizeExtent,
+  pointsToPath,
+  smoothPath,
+  strokeWidthPx,
+  iconMapTransform,
+  renderPrimitive,
+  renderComponentIcon,
+  buildDiagramSvg,
+} from "./src/render";
 export type {
-  ComponentRef,
-  Placement,
-  Connection,
-  DiagramOptions,
-} from "./src/diagram";
-
-export {
-  // アイコン（Icon 図形）
-  parseValue,
-  parseIcon,
-  parseExtends,
-  extractIconBody,
-  iconCoordSystem,
-  iconGraphics,
-  renderIcon,
-} from "./src/icon";
-
-export type {
-  AnnValue,
-  AnnEnum,
-  AnnRecord,
-  IconDef,
-  IconBox,
-  IconTransform,
-  IconContext,
-} from "./src/icon";
+  FlipSigns,
+  IconMap,
+  NodeIcon,
+  DiagramSvgOptions,
+  DiagramSvgResult,
+} from "./src/render";
