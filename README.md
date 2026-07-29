@@ -295,6 +295,7 @@ Documentation が無いモデルではその旨を通知する。
 
 シミュレーションのビルド生成物（C/exe/mat 等）はソースを汚さないよう、ワークスペース直下の
 `.modelica-build/` に**クラス名の完全ネスト**で出力する（自動生成・`.gitignore` 済）。
+出力先のルートは設定 `modelica.buildDirectory` で変更できる。
 例: `EAST.Orbital.Examples.Foo` → `.modelica-build/EAST/Orbital/Examples/Foo/`。
 
 結果と同じフォルダに、再現・アーカイブ用のモデル情報も出力する。
@@ -311,6 +312,7 @@ Documentation が無いモデルではその旨を通知する。
 チェック / シミュレーションには **OpenModelica** が必要で、その `omc` 実行ファイルが
 **`PATH` に通っている**こと。ターミナルで `omc --version` が動けば準備完了。
 PATH に無い場合は設定 `modelica.omcPath` に実行ファイルの絶対パスを指定してもよい。
+`modelica.omcPath` が空の場合は OS の `PATH` から `omc` を探す。
 
 既定インストール先（Windows）は次の形式で、`bin` フォルダを `PATH` に追加する。
 
@@ -328,9 +330,12 @@ C:\Program Files\OpenModelica<バージョン>-64bit\bin
 
 | 設定キー | 既定 | 説明 |
 |---|---|---|
-| `modelica.omcPath` | `omc` | omc 実行ファイルのパス |
+| `modelica.omcPath` | 空文字 | omc 実行ファイルのパス。空なら OS の PATH から検索 |
 | `modelica.checkOnSave` | `false` | 保存時に自動で checkModel を実行 |
+| `modelica.buildDirectory` | `.modelica-build` | checkModel / simulate の作業ディレクトリ |
+| `modelica.simulation.startTime` | `0.0` | Simulation Setup の Start Time 初期値 |
 | `modelica.simulation.stopTime` | `1.0` | Simulation Setup の Stop Time 初期値 |
+| `modelica.simulation.interval` | `0.1` | Simulation Setup の Interval 初期値 |
 | `modelica.simulation.numberOfIntervals` | `500` | Simulation Setup の Number of Intervals 初期値 |
 | `modelica.tree.focusDefinition` | `true` | パッケージツリーから定義を開いたときに定義範囲へフォーカス表示 |
 

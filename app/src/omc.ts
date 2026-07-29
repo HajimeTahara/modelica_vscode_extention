@@ -170,7 +170,7 @@ export function buildSimulateScript(args: {
 
 /**
  * omc を .mos スクリプトで実行し stdout/stderr を返す。
- * omc が見つからない場合は分かりやすいエラーで reject。
+ * omcPath が空、または指定パスが見つからない場合は OS の PATH から omc を探す。
  */
 export function runOmc(
   omcPath: string,
@@ -195,11 +195,14 @@ export function runOmc(
       reject(e);
       return;
     }
-    cp.execFile(
-      omcPath,
-      [scriptPath],
-      { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
-      (error, stdout, stderr) => {
+
+    const configured = omcPath.trim();
+    const commands =
+      configured && configured !== "omc" ? [configured, "omc"] : ["omc"];
+    const finish = (fn: () => void): void => {
+      try {
+        fn();
+      } finally {
         if (tmpDir) {
           try {
             fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -207,20 +210,41 @@ export function runOmc(
             /* ignore */
           }
         }
-        if (error && error.code === "ENOENT") {
-          reject(
-            new Error(
-              `omc が見つかりません（${omcPath}）。OpenModelica の bin を PATH に追加するか、設定 modelica.omcPath を確認してください。`
-            )
-          );
-          return;
-        }
-        resolve({
-          stdout: stdout || "",
-          stderr: stderr || "",
-          error: error || null,
-        });
       }
-    );
+    };
+    const runNext = (index: number): void => {
+      const command = commands[index]!;
+      cp.execFile(
+        command,
+        [scriptPath],
+        { cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+        (error, stdout, stderr) => {
+          if (error && error.code === "ENOENT" && index + 1 < commands.length) {
+            runNext(index + 1);
+            return;
+          }
+          if (error && error.code === "ENOENT") {
+            finish(() =>
+              reject(
+                new Error(
+                  `omc が見つかりません。設定 modelica.omcPath を確認するか、OpenModelica の bin を PATH に追加してください。試行: ${commands.join(
+                    ", "
+                  )}`
+                )
+              )
+            );
+            return;
+          }
+          finish(() =>
+            resolve({
+              stdout: stdout || "",
+              stderr: stderr || "",
+              error: error || null,
+            })
+          );
+        }
+      );
+    };
+    runNext(0);
   });
 }

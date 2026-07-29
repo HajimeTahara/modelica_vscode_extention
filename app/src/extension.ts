@@ -279,16 +279,22 @@ async function copyFilePath(arg: unknown): Promise<void> {
 interface ModelicaConfig {
   omcPath: string;
   checkOnSave: boolean;
+  buildDirectory: string;
+  startTime: number;
   stopTime: number;
+  interval: number;
   intervals: number;
 }
 
 function getConfig(): ModelicaConfig {
   const c = vscode.workspace.getConfiguration("modelica");
   return {
-    omcPath: c.get("omcPath", "omc"),
+    omcPath: c.get("omcPath", ""),
     checkOnSave: c.get("checkOnSave", false),
+    buildDirectory: c.get("buildDirectory", ".modelica-build"),
+    startTime: c.get("simulation.startTime", 0.0),
     stopTime: c.get("simulation.stopTime", 1.0),
+    interval: c.get("simulation.interval", 0.1),
     intervals: c.get("simulation.numberOfIntervals", 500),
   };
 }
@@ -332,15 +338,23 @@ function applyDiagnostics(parsed: omc.OmcDiagnostic[]): void {
 }
 
 /**
- * ワークスペース直下 .modelica-build にクラス名の完全ネストで実行用ディレクトリを用意する。
+ * 設定されたビルドルートにクラス名の完全ネストで実行用ディレクトリを用意する。
  * 例: EAST.Orbital.Examples.Foo -> .modelica-build/EAST/Orbital/Examples/Foo
  */
-function ensureBuildDir(referenceFsPath: string, className: string): string {
+function ensureBuildDir(
+  referenceFsPath: string,
+  className: string,
+  buildDirectory: string
+): string {
   const wsFolder = vscode.workspace.getWorkspaceFolder(
     vscode.Uri.file(referenceFsPath)
   );
   const base = wsFolder ? wsFolder.uri.fsPath : path.dirname(referenceFsPath);
-  const root = path.join(base, ".modelica-build");
+  const configured = buildDirectory.trim() || ".modelica-build";
+  const expanded = configured
+    .replace(/\$\{workspaceFolder\}/g, base)
+    .replace(/\$\{fileDirname\}/g, path.dirname(referenceFsPath));
+  const root = path.isAbsolute(expanded) ? expanded : path.join(base, expanded);
   fs.mkdirSync(root, { recursive: true });
   const gi = path.join(root, ".gitignore");
   if (!fs.existsSync(gi)) fs.writeFileSync(gi, "*\n", "utf8");
@@ -357,6 +371,12 @@ interface OmcTarget {
   className: string;
 }
 
+/** シミュレーション対象。package.mo 内のネストクラスも qname で保持する。 */
+interface SimulationTarget extends OmcTarget {
+  doc: vscodeTypes.TextDocument;
+  classText: string;
+}
+
 /** 対象ドキュメントから omc 実行の共通パラメータを組み立てる */
 function resolveTarget(doc: vscodeTypes.TextDocument): OmcTarget {
   const filePath = doc.uri.fsPath;
@@ -364,6 +384,21 @@ function resolveTarget(doc: vscodeTypes.TextDocument): OmcTarget {
   const loadTarget = root ? path.join(root, "package.mo") : filePath;
   const className = classNameForFile(filePath);
   return { filePath, loadTarget, className };
+}
+
+/** コマンド呼び出し元（ツリー / エディタカーソル / Uri）からシミュレーション対象を解決する。 */
+async function resolveSimulationTarget(arg: unknown): Promise<SimulationTarget | null> {
+  const target = await classTargetForCommand(arg);
+  if (!target) return null;
+  const doc = await vscode.workspace.openTextDocument(target.file);
+  const root = findLibraryRoot(path.dirname(target.file));
+  return {
+    doc,
+    filePath: target.file,
+    loadTarget: root ? path.join(root, "package.mo") : target.file,
+    className: target.qname,
+    classText: target.text,
+  };
 }
 
 async function runCheck(doc: vscodeTypes.TextDocument | undefined): Promise<void> {
@@ -379,7 +414,7 @@ async function runCheck(doc: vscodeTypes.TextDocument | undefined): Promise<void
     return;
   }
   const script = omc.buildCheckScript({ loadTarget, className });
-  const buildDir = ensureBuildDir(filePath, className);
+  const buildDir = ensureBuildDir(filePath, className, cfg.buildDirectory);
 
   try {
     const res = await vscode.window.withProgress(
@@ -607,25 +642,19 @@ async function validateTotalModel(
 
 /** 指定オプションで実際に simulate を実行する */
 async function runSimulation(
-  doc: vscodeTypes.TextDocument | undefined,
+  target: SimulationTarget,
   rawOptions: unknown
 ): Promise<void> {
-  if (!doc || doc.languageId !== "modelica") {
-    vscode.window.showErrorMessage(
-      "シミュレーションする Modelica ファイルを開いてください。"
-    );
-    return;
-  }
   const options = sanitizeOptions(rawOptions);
-  await doc.save();
+  await target.doc.save();
   const cfg = getConfig();
-  const { filePath, loadTarget, className } = resolveTarget(doc);
+  const { filePath, loadTarget, className } = target;
   if (!className) {
     vscode.window.showErrorMessage("実行対象のクラス名を特定できません。");
     return;
   }
   const numberOfIntervals = effectiveIntervals(options);
-  const buildDir = ensureBuildDir(filePath, className);
+  const buildDir = ensureBuildDir(filePath, className, cfg.buildDirectory);
   const simpleName = className.split(".").pop()!;
 
   // モデル情報の保存（再現・アーカイブ用）:
@@ -967,15 +996,16 @@ function pick<T>(...vals: (T | undefined | null)[]): T {
 
 /** Simulation Setup ダイアログ（Webview）を開き、実行・保存を仲介する */
 async function openSimulationSetup(
-  doc: vscodeTypes.TextDocument | undefined
+  arg: unknown
 ): Promise<void> {
-  if (!doc || doc.languageId !== "modelica") {
+  const target = await resolveSimulationTarget(arg);
+  if (!target || target.doc.languageId !== "modelica") {
     vscode.window.showErrorMessage(
       "シミュレーションする Modelica ファイルを開いてください。"
     );
     return;
   }
-  const { className } = resolveTarget(doc);
+  const { className } = target;
   if (!className) {
     vscode.window.showErrorMessage("実行対象のクラス名を特定できません。");
     return;
@@ -983,7 +1013,7 @@ async function openSimulationSetup(
   const cfg = getConfig();
   const stateKey = `modelica.simopts.${className}`;
   const saved = extContext.workspaceState.get<Partial<SimOptions>>(stateKey, {});
-  const text = doc.getText();
+  const text = target.classText;
   const expA = annotations.parseExperiment(text) || {};
   const flagsA = annotations.parseSimulationFlags(text) || {};
   // 優先順位: モデルの annotation > 前回設定(workspaceState) > 既定
@@ -997,13 +1027,13 @@ async function openSimulationSetup(
     numberOfIntervals = pick(saved.numberOfIntervals, cfg.intervals);
   } else {
     intervalMode = pick(saved.intervalMode, "numberOfIntervals");
-    interval = pick(saved.interval, 0.1);
+    interval = pick(saved.interval, cfg.interval);
     numberOfIntervals = pick(saved.numberOfIntervals, cfg.intervals);
   }
   const annLogging = (flagsA.logging || []).filter((f) => LOG_FLAGS.includes(f));
 
   const initial: SimOptions = {
-    startTime: pick(expA.startTime, saved.startTime, 0),
+    startTime: pick(expA.startTime, saved.startTime, cfg.startTime),
     stopTime: pick(expA.stopTime, saved.stopTime, cfg.stopTime),
     intervalMode,
     interval,
@@ -1029,11 +1059,11 @@ async function openSimulationSetup(
         const opts = sanitizeOptions(msg.values);
         await extContext.workspaceState.update(stateKey, opts);
         panel.dispose();
-        runSimulation(doc, opts);
+        runSimulation(target, opts);
       } else if (msg.command === "saveToModel") {
         const opts = sanitizeOptions(msg.values);
         await extContext.workspaceState.update(stateKey, opts);
-        await saveSimSetupToModel(doc, className, opts);
+        await saveSimSetupToModel(target.doc, className, opts);
       } else if (msg.command === "cancel") {
         panel.dispose();
       }
@@ -2041,11 +2071,11 @@ export function activate(context: vscodeTypes.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("modelica.check", () =>
-      runCheck(vscode.window.activeTextEditor?.document)
+    vscode.commands.registerCommand("modelica.check", (arg?: unknown) =>
+      documentForCommand(arg).then((doc) => runCheck(doc || undefined))
     ),
-    vscode.commands.registerCommand("modelica.simulate", () =>
-      openSimulationSetup(vscode.window.activeTextEditor?.document)
+    vscode.commands.registerCommand("modelica.simulate", (arg?: unknown) =>
+      openSimulationSetup(arg)
     )
   );
 

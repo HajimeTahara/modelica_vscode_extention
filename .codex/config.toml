@@ -4,4 +4,4 @@ default_permissions = "project-edit"
 extends = ":workspace"
 
 [permissions.project-edit.filesystem.":workspace_roots"]
-"lib" = "read"
+"ref" = "read"

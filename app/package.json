@@ -95,22 +95,39 @@
       "properties": {
         "modelica.omcPath": {
           "type": "string",
-          "default": "omc",
-          "description": "OpenModelica コンパイラ (omc) の実行ファイルパス。PATH に通っていれば \"omc\" のままでよい。"
+          "default": "",
+          "description": "OpenModelica コンパイラ (omc) の実行ファイルパス。空の場合、または指定パスが見つからない場合は OS の PATH から omc を探す。"
         },
         "modelica.checkOnSave": {
           "type": "boolean",
           "default": false,
           "description": "保存時に checkModel を自動実行してエラーを表示する。"
         },
+        "modelica.buildDirectory": {
+          "type": "string",
+          "default": ".modelica-build",
+          "description": "checkModel / simulate の作業ディレクトリ。相対パスは対象ファイルが属するワークスペースフォルダから解決する。"
+        },
+        "modelica.simulation.startTime": {
+          "type": "number",
+          "default": 0.0,
+          "description": "シミュレーションの開始時刻 [s]。"
+        },
         "modelica.simulation.stopTime": {
           "type": "number",
           "default": 1.0,
           "description": "シミュレーションの終了時刻 [s]。"
         },
+        "modelica.simulation.interval": {
+          "type": "number",
+          "default": 0.1,
+          "exclusiveMinimum": 0,
+          "description": "シミュレーションの出力間隔 [s]。Simulation Setup で Interval を選んだときの初期値。"
+        },
         "modelica.simulation.numberOfIntervals": {
           "type": "integer",
           "default": 500,
+          "minimum": 1,
           "description": "シミュレーションの出力区間数。"
         },
         "modelica.tree.focusDefinition": {
@@ -285,29 +302,24 @@
           "group": "navigation@2"
         },
         {
-          "command": "modelica.showDocumentation",
+          "command": "modelica.showDiagram",
           "when": "resourceLangId == modelica",
           "group": "navigation@3"
         },
         {
-          "command": "modelica.toggleAnnotations",
+          "command": "modelica.showIcon",
           "when": "resourceLangId == modelica",
           "group": "navigation@4"
         },
         {
-          "command": "modelica.showDiagram",
+          "command": "modelica.showDocumentation",
           "when": "resourceLangId == modelica",
           "group": "navigation@5"
         },
         {
-          "command": "modelica.showIcon",
+          "command": "modelica.toggleAnnotations",
           "when": "resourceLangId == modelica",
           "group": "navigation@6"
-        },
-        {
-          "command": "modelica.packageTree.clearFocus",
-          "when": "resourceLangId == modelica && config.modelica.tree.focusDefinition",
-          "group": "navigation@7"
         }
       ],
       "view/title": [
