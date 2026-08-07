@@ -11,7 +11,7 @@ export function isValidIdent(name: string | undefined): boolean {
 
 /**
  * dir の Modelica パッケージ修飾名。package.mo を持つ限り親をたどりドット連結。
- * 例: .../modelica/EAST/Blocks/Math -> "EAST.Blocks.Math"。package.mo が無ければ ""。
+ * 例: .../modelica/Helion/Blocks/Math -> "Helion.Blocks.Math"。package.mo が無ければ ""。
  */
 export function qualifiedName(dir: string): string {
   const parts: string[] = [];

@@ -4,7 +4,7 @@
 
 # Modelica Language (modelica_vscode_extention)
 
-Modelica (`.mo`) 言語向けの VSCode 拡張機能。EAST ライブラリ開発を支援する。
+Modelica (`.mo`) 言語向けの VSCode 拡張機能。Helion ライブラリ開発を支援する。
 TypeScript 実装で**ランタイム依存パッケージなし**（ビルドにのみ `typescript` を使う）。
 ナビ/補完/リネームは自前の軽量シンボル解決で動き（OpenModelica 不要）、
 コンパイル/計算実行のみ OpenModelica `omc` に委譲するハイブリッド構成。
@@ -26,7 +26,7 @@ install.bat --uninstall  REM アンインストール
 1. `app/node_modules` が無ければ `npm install`
 2. ルート `LICENSE` を一時的に `app/LICENSE` としてコピー
 3. `app/` で `vsce package` を実行（`vscode:prepublish` により `npm run rebuild` も実行）
-4. `.vsix-build/east.modelica-vscode-<version>.vsix` を作成し、一時コピーした `app/LICENSE` を削除
+4. `.vsix-build/helion.modelica-vscode-<version>.vsix` を作成し、一時コピーした `app/LICENSE` を削除
 5. `code --install-extension <vsix> --force` で VSCode にインストール
 
 **ビルドや VSIX 作成が失敗した場合はインストールに進まない**ので、既にインストール済みの版はそのまま残る。
@@ -120,10 +120,10 @@ Activity Bar の **Modelica ビュー**から実行する。ビュー右上の *
 
 識別子の上で `F12`（定義へ移動）または `Ctrl`+クリック。
 
-- **継承もと・型参照** — `extends EAST.Orbital.Bodies.CelestialBodyData` や
+- **継承もと・型参照** — `extends Helion.Orbital.Bodies.CelestialBodyData` や
   `Modelica.Blocks.Interfaces.SISO` などのクラス名から、その定義ファイル・定義行へジャンプ。
 - **変数・コンポーネント宣言** — 使用箇所（例: `sun.mu` の `sun`）から現在ファイルの宣言行へ。
-- ワークスペース内のライブラリ（EAST・MSL 等）をまたいで解決する。ルートパッケージは各
+- ワークスペース内のライブラリ（Helion・MSL 等）をまたいで解決する。ルートパッケージは各
   `package.mo` の宣言名で判定するため、ディレクトリ名と異なっていてもよい
   （MSL: フォルダ `ModelicaStandardLibrary` / パッケージ `Modelica`）。
 
@@ -136,8 +136,8 @@ MSL を使うため、MSL を vendor していないとシミュレーション�
 `.` の入力、または `Ctrl`+`Space` で候補を表示。
 
 - **パッケージ/クラスの子** — `Modelica.Blocks.` → `Interfaces` / `Sources` / `Math` …、
-  `EAST.Orbital.Bodies.` → `Sun` / `Earth` / `Moon` …。
-- **コンポーネントのメンバー** — `sun.` → その型（`EAST.Orbital.Bodies.Sun`）のフィールドを
+  `Helion.Orbital.Bodies.` → `Sun` / `Earth` / `Moon` …。
+- **コンポーネントのメンバー** — `sun.` → その型（`Helion.Orbital.Bodies.Sun`）のフィールドを
   継承（`extends`）を辿って列挙（`bodyName` / `mu` / `equatorialRadius` / `rotationRate`）。
 - **素の単語** — Modelica キーワード・組込み型（`Real` 等）・現在ファイルのコンポーネント・
   ルートパッケージ・同一パッケージの兄弟クラス。
@@ -253,6 +253,11 @@ Documentation が無いモデルではその旨を通知する。
 またはコマンドパレット（`Modelica:`）から実行する。対象クラスは開いているファイルから
 （ディレクトリ構成の `within` 修飾名 ＋ ファイル名で）自動判定する。
 
+- **実行ライブラリの設定** — チェック／シミュレーションを開始すると、まず Setup 画面を表示する。
+  ライブラリは複数行の入力欄で今回だけ追加・除外でき、設定 `modelica.libraryFiles` の項目は初期値として
+  入る。「ライブラリを追加」で行を作り、各行のフォルダボタンからエクスプローラーでトップ
+  `package.mo` を選択できる。入力した内容は settings.json へ保存されない。`Modelica` 基本ライブラリは
+  常に読み込む。
 - **モデルをチェック (checkModel)** — ライブラリを読み込み `checkModel` で検証。
   エラー/警告は Problems パネルに表示され、該当行にジャンプできる。
 - **シミュレーション実行 (simulate)** — OMEdit 風の **Simulation Setup ダイアログ**を表示し、
@@ -296,7 +301,7 @@ Documentation が無いモデルではその旨を通知する。
 シミュレーションのビルド生成物（C/exe/mat 等）はソースを汚さないよう、ワークスペース直下の
 `.modelica-build/` に**クラス名の完全ネスト**で出力する（自動生成・`.gitignore` 済）。
 出力先のルートは設定 `modelica.buildDirectory` で変更できる。
-例: `EAST.Orbital.Examples.Foo` → `.modelica-build/EAST/Orbital/Examples/Foo/`。
+例: `Helion.Orbital.Examples.Foo` → `.modelica-build/Helion/Orbital/Examples/Foo/`。
 
 結果と同じフォルダに、再現・アーカイブ用のモデル情報も出力する。
 
@@ -327,12 +332,15 @@ C:\Program Files\OpenModelica<バージョン>-64bit\bin
 ## 設定（Settings）
 
 詳細な用途と変更方法は [docs/SETTINGS.md](docs/SETTINGS.md) にまとめている。
+既定ライブラリをエクスプローラーから設定するには、コマンドパレットの
+「Modelica: 既定ライブラリをエクスプローラーから選択」を実行する。
 
 | 設定キー | 既定 | 説明 |
 |---|---|---|
 | `modelica.omcPath` | 空文字 | omc 実行ファイルのパス。空なら OS の PATH から検索 |
 | `modelica.checkOnSave` | `false` | 保存時に自動で checkModel を実行 |
 | `modelica.buildDirectory` | `.modelica-build` | checkModel / simulate の作業ディレクトリ |
+| `modelica.libraryFiles` | `[]` | checkModel / simulate で既定として読み込むライブラリのトップ `package.mo` |
 | `modelica.simulation.startTime` | `0.0` | Simulation Setup の Start Time 初期値 |
 | `modelica.simulation.stopTime` | `1.0` | Simulation Setup の Stop Time 初期値 |
 | `modelica.simulation.interval` | `0.1` | Simulation Setup の Interval 初期値 |

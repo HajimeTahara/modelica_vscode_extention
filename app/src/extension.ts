@@ -280,23 +280,243 @@ interface ModelicaConfig {
   omcPath: string;
   checkOnSave: boolean;
   buildDirectory: string;
+  libraryFiles: string[];
   startTime: number;
   stopTime: number;
   interval: number;
   intervals: number;
 }
 
-function getConfig(): ModelicaConfig {
-  const c = vscode.workspace.getConfiguration("modelica");
+function getConfig(resource?: vscodeTypes.Uri): ModelicaConfig {
+  const c = vscode.workspace.getConfiguration("modelica", resource);
+  const libraryFiles = c.get<unknown>("libraryFiles", []);
   return {
     omcPath: c.get("omcPath", ""),
     checkOnSave: c.get("checkOnSave", false),
     buildDirectory: c.get("buildDirectory", ".modelica-build"),
+    libraryFiles: Array.isArray(libraryFiles)
+      ? libraryFiles.filter((f): f is string => typeof f === "string")
+      : [],
     startTime: c.get("simulation.startTime", 0.0),
     stopTime: c.get("simulation.stopTime", 1.0),
     interval: c.get("simulation.interval", 0.1),
     intervals: c.get("simulation.numberOfIntervals", 500),
   };
+}
+
+/** Windows では大文字小文字を区別せず、ライブラリ指定を重複除去する。 */
+function libraryPathKey(file: string): string {
+  const normalized = path.normalize(file);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** `${workspaceFolder}`（multi-root の名前付き形式も含む）を実行対象の文脈で展開する。 */
+function expandLibraryPath(raw: string, referenceFsPath: string): string {
+  const activeFolder = vscode.workspace.getWorkspaceFolder(
+    vscode.Uri.file(referenceFsPath)
+  );
+  return raw.replace(/\$\{workspaceFolder(?::([^}]+))?\}/g, (_all, name) => {
+    const folder = name
+      ? vscode.workspace.workspaceFolders?.find((f) => f.name === name)
+      : activeFolder;
+    return folder ? folder.uri.fsPath : _all;
+  });
+}
+
+/** 設定値またはファイルピッカーの結果を絶対パスへ正規化する。 */
+function resolveLibraryFile(raw: string, referenceFsPath: string): string {
+  const expanded = expandLibraryPath(raw.trim(), referenceFsPath);
+  const wsFolder = vscode.workspace.getWorkspaceFolder(
+    vscode.Uri.file(referenceFsPath)
+  );
+  const base = wsFolder ? wsFolder.uri.fsPath : path.dirname(referenceFsPath);
+  return path.normalize(
+    path.isAbsolute(expanded) ? expanded : path.resolve(base, expanded)
+  );
+}
+
+/** ライブラリとして選べるのは、package 宣言を持つトップの package.mo だけ。 */
+function isLibraryPackageFile(file: string): boolean {
+  if (path.basename(file).toLowerCase() !== "package.mo") return false;
+  try {
+    if (!fs.statSync(file).isFile()) return false;
+    return symbols.readPrimaryClass(fs.readFileSync(file, "utf8"))?.kind === "package";
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 設定されたライブラリから有効なトップ package.mo だけを取り出す。 */
+function configuredLibraryFiles(referenceFsPath: string): {
+  files: string[];
+  invalid: string[];
+} {
+  const cfg = getConfig(vscode.Uri.file(referenceFsPath));
+  const files: string[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+  for (const configured of cfg.libraryFiles) {
+    const file = resolveLibraryFile(configured, referenceFsPath);
+    const key = libraryPathKey(file);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!isLibraryPackageFile(file)) {
+      invalid.push(configured);
+      continue;
+    }
+    files.push(file);
+  }
+  return { files, invalid };
+}
+
+function uniqueLibraryFiles(files: string[]): string[] {
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    const key = libraryPathKey(file);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** エクスプローラーからライブラリのトップ package.mo を選ぶ。 */
+async function selectLibraryPackagesFromExplorer(
+  canSelectMany = true
+): Promise<string[] | null> {
+  const picked = await vscode.window.showOpenDialog({
+    title: "Modelica: ライブラリのトップ package.mo を選択",
+    canSelectMany,
+    canSelectFiles: true,
+    canSelectFolders: false,
+    filters: { "Modelica package": ["mo"] },
+  });
+  if (!picked) return null;
+  const files = picked.map((uri) => uri.fsPath);
+  const invalid = files.filter((file) => !isLibraryPackageFile(file));
+  if (invalid.length) {
+    vscode.window.showErrorMessage(
+      `Modelica: ライブラリのトップ package.mo（package 宣言を持つファイル）を選択してください: ${invalid.join(
+        ", "
+      )}`
+    );
+    return null;
+  }
+  return uniqueLibraryFiles(files);
+}
+
+/** Setup 画面の 1 行へ設定する package.mo を 1 つ選ぶ。 */
+async function selectLibraryPackageFromExplorer(): Promise<string | null> {
+  const files = await selectLibraryPackagesFromExplorer(false);
+  return files?.[0] ?? null;
+}
+
+/** Setup 画面で入力されたライブラリパスを検証・正規化する。 */
+function resolveRunLibraries(
+  raw: unknown,
+  referenceFsPath: string
+): string[] | null {
+  if (!Array.isArray(raw) || raw.some((file) => typeof file !== "string")) {
+    vscode.window.showErrorMessage("Modelica: ライブラリパスの形式が正しくありません。");
+    return null;
+  }
+  const files = uniqueLibraryFiles(
+    raw
+      .map((file) => file.trim())
+      .filter(Boolean)
+      .map((file) => resolveLibraryFile(file, referenceFsPath))
+  );
+  const invalid = files.filter((file) => !isLibraryPackageFile(file));
+  if (invalid.length) {
+    vscode.window.showErrorMessage(
+      `Modelica: ライブラリのトップ package.mo（package 宣言を持つファイル）を指定してください: ${invalid.join(
+        ", "
+      )}`
+    );
+    return null;
+  }
+  return files;
+}
+
+/** Setup 画面の初期値。無効な settings.json 項目は除外して知らせる。 */
+function defaultRunLibraries(referenceFsPath: string): string[] {
+  const configured = configuredLibraryFiles(referenceFsPath);
+  if (configured.invalid.length) {
+    vscode.window.showWarningMessage(
+      `Modelica: modelica.libraryFiles の無効な項目を除外しました: ${configured.invalid.join(
+        ", "
+      )}`
+    );
+  }
+  return configured.files;
+}
+
+interface WorkspaceFolderQuickPickItem extends vscodeTypes.QuickPickItem {
+  folder: vscodeTypes.WorkspaceFolder;
+}
+
+/** 既定ライブラリを書き込むワークスペースフォルダを決める。 */
+async function selectLibrarySettingsFolder(): Promise<vscodeTypes.WorkspaceFolder | null> {
+  const active = vscode.window.activeTextEditor;
+  const activeFolder = active
+    ? vscode.workspace.getWorkspaceFolder(active.document.uri)
+    : undefined;
+  if (activeFolder) return activeFolder;
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (!folders.length) {
+    vscode.window.showErrorMessage(
+      "Modelica: 既定ライブラリを保存するにはワークスペースフォルダを開いてください。"
+    );
+    return null;
+  }
+  if (folders.length === 1) return folders[0]!;
+  const selected = await vscode.window.showQuickPick<WorkspaceFolderQuickPickItem>(
+    folders.map((folder) => ({
+      label: folder.name,
+      description: folder.uri.fsPath,
+      folder,
+    })),
+    { title: "Modelica: 既定ライブラリを保存するワークスペースを選択" }
+  );
+  return selected ? selected.folder : null;
+}
+
+/** workspace 内のファイルは移植可能な ${workspaceFolder} 形式で設定へ保存する。 */
+function libraryFileSettingValue(
+  file: string,
+  folder: vscodeTypes.WorkspaceFolder
+): string {
+  const relative = path.relative(folder.uri.fsPath, file);
+  const isInside =
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative);
+  return isInside
+    ? `\${workspaceFolder}/${relative.split(path.sep).join("/")}`
+    : file;
+}
+
+/** エクスプローラーで選んだトップ package.mo を workspace の既定値として保存する。 */
+async function selectDefaultLibraryFiles(): Promise<void> {
+  const folder = await selectLibrarySettingsFolder();
+  if (!folder) return;
+  const files = await selectLibraryPackagesFromExplorer();
+  if (!files) return;
+  const values = files.map((file) => libraryFileSettingValue(file, folder));
+  await vscode.workspace
+    .getConfiguration("modelica", folder.uri)
+    .update("libraryFiles", values, vscode.ConfigurationTarget.WorkspaceFolder);
+  vscode.window.showInformationMessage(
+    `Modelica: ${values.length} 件の既定ライブラリを ${folder.name} の設定へ保存しました。`
+  );
+}
+
+function appendLibrarySelectionToOutput(libraryFiles: string[]): void {
+  output.appendLine(
+    libraryFiles.length
+      ? `# libraries: ${libraryFiles.join(", ")}`
+      : "# libraries: （選択なし）"
+  );
 }
 
 function toSeverity(s: omc.OmcSeverity): vscodeTypes.DiagnosticSeverity {
@@ -339,7 +559,7 @@ function applyDiagnostics(parsed: omc.OmcDiagnostic[]): void {
 
 /**
  * 設定されたビルドルートにクラス名の完全ネストで実行用ディレクトリを用意する。
- * 例: EAST.Orbital.Examples.Foo -> .modelica-build/EAST/Orbital/Examples/Foo
+ * 例: Helion.Orbital.Examples.Foo -> .modelica-build/Helion/Orbital/Examples/Foo
  */
 function ensureBuildDir(
   referenceFsPath: string,
@@ -401,19 +621,24 @@ async function resolveSimulationTarget(arg: unknown): Promise<SimulationTarget |
   };
 }
 
-async function runCheck(doc: vscodeTypes.TextDocument | undefined): Promise<void> {
+async function runCheck(
+  doc: vscodeTypes.TextDocument | undefined,
+  selectedLibraries?: string[]
+): Promise<void> {
   if (!doc || doc.languageId !== "modelica") {
     vscode.window.showErrorMessage("チェックする Modelica ファイルを開いてください。");
     return;
   }
   await doc.save();
-  const cfg = getConfig();
+  const cfg = getConfig(doc.uri);
   const { filePath, loadTarget, className } = resolveTarget(doc);
   if (!className) {
     vscode.window.showErrorMessage("チェック対象のクラス名を特定できません。");
     return;
   }
-  const script = omc.buildCheckScript({ loadTarget, className });
+  const libraryFiles =
+    selectedLibraries ?? configuredLibraryFiles(filePath).files;
+  const script = omc.buildCheckScript({ loadTarget, className, libraryFiles });
   const buildDir = ensureBuildDir(filePath, className, cfg.buildDirectory);
 
   try {
@@ -430,6 +655,7 @@ async function runCheck(doc: vscodeTypes.TextDocument | undefined): Promise<void
     applyDiagnostics(located);
 
     output.appendLine(`# checkModel(${className})`);
+    appendLibrarySelectionToOutput(libraryFiles);
     output.appendLine(res.stdout.trim());
     output.appendLine("");
 
@@ -456,6 +682,54 @@ async function runCheck(doc: vscodeTypes.TextDocument | undefined): Promise<void
   } catch (e) {
     vscode.window.showErrorMessage(errorMessage(e));
   }
+}
+
+/** 手動チェックの入口。ライブラリを編集できる Setup 画面を開く。 */
+async function openCheckWithLibrarySelection(arg: unknown): Promise<void> {
+  const doc = await documentForCommand(arg);
+  if (!doc || doc.languageId !== "modelica") {
+    await runCheck(doc || undefined);
+    return;
+  }
+  const { className } = resolveTarget(doc);
+  if (!className) {
+    vscode.window.showErrorMessage("チェック対象のクラス名を特定できません。");
+    return;
+  }
+  const panel = vscode.window.createWebviewPanel(
+    "modelicaCheckSetup",
+    `Check Setup: ${className}`,
+    { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+    { enableScripts: true }
+  );
+  panel.webview.html = getCheckSetupHtml(
+    panel.webview,
+    className,
+    defaultRunLibraries(doc.uri.fsPath)
+  );
+  panel.webview.onDidReceiveMessage(
+    async (msg: {
+      command?: string;
+      libraryFiles?: unknown;
+      id?: unknown;
+    } | undefined) => {
+      if (!msg) return;
+      if (msg.command === "check") {
+        const libraryFiles = resolveRunLibraries(msg.libraryFiles ?? [], doc.uri.fsPath);
+        if (!libraryFiles) return;
+        panel.dispose();
+        await runCheck(doc, libraryFiles);
+      } else if (msg.command === "browseLibrary" && msg.id !== undefined) {
+        const file = await selectLibraryPackageFromExplorer();
+        if (file)
+          panel.webview.postMessage({ command: "setLibrary", id: msg.id, file });
+      } else if (msg.command === "cancel") {
+        panel.dispose();
+      }
+    },
+    undefined,
+    extContext.subscriptions
+  );
 }
 
 // omc がサポートする代表的なソルバ（Simulation Setup のプルダウン用・許可リスト兼用）
@@ -643,17 +917,20 @@ async function validateTotalModel(
 /** 指定オプションで実際に simulate を実行する */
 async function runSimulation(
   target: SimulationTarget,
-  rawOptions: unknown
+  rawOptions: unknown,
+  selectedLibraries?: string[]
 ): Promise<void> {
   const options = sanitizeOptions(rawOptions);
   await target.doc.save();
-  const cfg = getConfig();
+  const cfg = getConfig(target.doc.uri);
   const { filePath, loadTarget, className } = target;
   if (!className) {
     vscode.window.showErrorMessage("実行対象のクラス名を特定できません。");
     return;
   }
   const numberOfIntervals = effectiveIntervals(options);
+  const libraryFiles =
+    selectedLibraries ?? configuredLibraryFiles(filePath).files;
   const buildDir = ensureBuildDir(filePath, className, cfg.buildDirectory);
   const simpleName = className.split(".").pop()!;
 
@@ -720,6 +997,7 @@ async function runSimulation(
     loadTarget,
     className,
     options: simOptions,
+    libraryFiles,
   });
 
   try {
@@ -747,6 +1025,7 @@ async function runSimulation(
     output.appendLine(
       `# simulate(${className}, startTime=${options.startTime}, stopTime=${options.stopTime}, numberOfIntervals=${numberOfIntervals}, method="${options.method}", tolerance=${options.tolerance}, outputFormat="${options.outputFormat}", lv="${options.logging.join(",")}")`
     );
+    appendLibrarySelectionToOutput(libraryFiles);
     output.appendLine(res.stdout.trim());
     output.appendLine("");
 
@@ -814,11 +1093,124 @@ function htmlAttr(v: unknown): string {
   return String(v).replace(/"/g, "&quot;");
 }
 
+const FOLDER_BUTTON_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M1.75 3A1.75 1.75 0 0 0 0 4.75v6.5C0 12.216.784 13 1.75 13h12.5c.966 0 1.75-.784 1.75-1.75v-5.5A1.75 1.75 0 0 0 14.25 4H8.8L7.55 2.75A1.75 1.75 0 0 0 6.313 2H1.75v1ZM1 5.75c0-.414.336-.75.75-.75h12.5c.414 0 .75.336.75.75v5.5a.75.75 0 0 1-.75.75H1.75a.75.75 0 0 1-.75-.75v-5.5Z" /></svg>`;
+
+function libraryInputRowsHtml(libraryFiles: string[]): string {
+  return libraryFiles
+    .map((file, index) =>
+      `<div class="library-row" data-library-id="${index}"><input class="library-file" type="text" value="${htmlAttr(
+        file
+      )}" aria-label="Library package.mo path" /><button class="secondary browse-library" type="button" title="トップ package.mo を選択" aria-label="トップ package.mo を選択">${FOLDER_BUTTON_ICON}</button><button class="secondary remove-library" type="button">削除</button></div>`
+    )
+    .join("");
+}
+
+/** checkModel 実行前にライブラリを編集する Webview。 */
+function getCheckSetupHtml(
+  webview: vscodeTypes.Webview,
+  className: string,
+  libraryFiles: string[]
+): string {
+  const nonce = getNonce();
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; font-size: var(--vscode-font-size); }
+  h2 { font-size: 1.1em; margin: 0 0 4px; }
+  .cls, .hint { color: var(--vscode-descriptionForeground); }
+  .cls { margin-bottom: 16px; font-family: var(--vscode-editor-font-family); }
+  fieldset { border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, #8884)); border-radius: 4px; padding: 10px 14px; }
+  legend { padding: 0 6px; color: var(--vscode-descriptionForeground); }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 4px 6px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
+  .library-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; margin-bottom: 6px; }
+  .library-actions, .buttons { display: flex; gap: 8px; }
+  .library-actions { margin-bottom: 8px; }
+  .browse-library { padding: 4px 7px; }
+  .browse-library svg { width: 16px; height: 16px; display: block; }
+  .buttons { margin-top: 14px; justify-content: flex-end; }
+  button { padding: 6px 14px; border: none; border-radius: 2px; cursor: pointer; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+</style>
+</head>
+<body>
+  <h2>Check Setup</h2>
+  <div class="cls">${className}</div>
+  <fieldset>
+    <legend>Libraries</legend>
+    <div class="library-actions">
+      <button class="secondary" type="button" id="addLibrary">ライブラリを追加</button>
+    </div>
+    <div id="libraryFiles">${libraryInputRowsHtml(libraryFiles)}</div>
+    <p class="hint">今回の checkModel にだけ使用します。settings.json の既定値は初期値として表示されます。</p>
+  </fieldset>
+  <div class="buttons">
+    <button class="secondary" id="cancel">Cancel</button>
+    <button id="check">Check Model</button>
+  </div>
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  let nextLibraryId = document.querySelectorAll('.library-row').length;
+  function bindLibraryRow(row) {
+    row.querySelector('.remove-library').addEventListener('click', () => row.remove());
+    row.querySelector('.browse-library').addEventListener('click', () => {
+      vscode.postMessage({ command: 'browseLibrary', id: row.dataset.libraryId });
+    });
+  }
+  function addLibraryRow(value = '') {
+    const row = document.createElement('div');
+    row.className = 'library-row';
+    row.dataset.libraryId = String(nextLibraryId++);
+    const input = document.createElement('input');
+    input.className = 'library-file';
+    input.type = 'text';
+    input.value = value;
+    input.setAttribute('aria-label', 'Library package.mo path');
+    const browse = document.createElement('button');
+    browse.className = 'secondary browse-library';
+    browse.type = 'button';
+    browse.title = 'トップ package.mo を選択';
+    browse.setAttribute('aria-label', 'トップ package.mo を選択');
+    browse.innerHTML = '${FOLDER_BUTTON_ICON}';
+    const remove = document.createElement('button');
+    remove.className = 'secondary remove-library';
+    remove.type = 'button';
+    remove.textContent = '削除';
+    row.append(input, browse, remove);
+    bindLibraryRow(row);
+    document.getElementById('libraryFiles').append(row);
+  }
+  document.querySelectorAll('.library-row').forEach(bindLibraryRow);
+  document.getElementById('addLibrary').addEventListener('click', () => addLibraryRow());
+  window.addEventListener('message', (event) => {
+    const message = event.data;
+    if (message && message.command === 'setLibrary' && message.id !== undefined) {
+      const row = Array.from(document.querySelectorAll('.library-row')).find((item) => item.dataset.libraryId === String(message.id));
+      const input = row && row.querySelector('.library-file');
+      if (input) input.value = String(message.file || '');
+    }
+  });
+  document.getElementById('check').addEventListener('click', () => {
+    const libraryFiles = Array.from(document.querySelectorAll('.library-file')).map((e) => e.value.trim()).filter(Boolean);
+    vscode.postMessage({ command: 'check', libraryFiles });
+  });
+  document.getElementById('cancel').addEventListener('click', () => vscode.postMessage({ command: 'cancel' }));
+</script>
+</body>
+</html>`;
+}
+
 /** OMEdit の Simulation Setup 風の Webview HTML を生成する */
 function getSimSetupHtml(
   webview: vscodeTypes.Webview,
   className: string,
-  initial: SimOptions
+  initial: SimOptions,
+  libraryFiles: string[]
 ): string {
   const nonce = getNonce();
   const solverOptions = SOLVERS.map(
@@ -855,7 +1247,7 @@ function getSimSetupHtml(
   .row { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; margin-bottom: 8px; }
   .row:last-child { margin-bottom: 0; }
   label.field { text-align: right; }
-  input[type=number], select { width: 100%; box-sizing: border-box; padding: 4px 6px;
+  input[type=number], input[type=text], select { width: 100%; box-sizing: border-box; padding: 4px 6px;
     background: var(--vscode-input-background); color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
   .radioline { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -863,6 +1255,11 @@ function getSimSetupHtml(
   .logs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; }
   .chk { display: flex; align-items: center; gap: 6px; }
   .chk input, .radioline input[type=radio] { width: auto; }
+  .library-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; margin-bottom: 6px; }
+  .library-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+  .browse-library { padding: 4px 7px; }
+  .browse-library svg { width: 16px; height: 16px; display: block; }
+  .hint { color: var(--vscode-descriptionForeground); margin: 6px 0 0; }
   .buttons { margin-top: 6px; display: flex; gap: 8px; justify-content: flex-end; }
   button { padding: 6px 14px; border: none; border-radius: 2px; cursor: pointer;
     background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
@@ -896,6 +1293,15 @@ function getSimSetupHtml(
   </fieldset>
 
   <fieldset>
+    <legend>Libraries</legend>
+    <div class="library-actions">
+      <button class="secondary" type="button" id="addLibrary">ライブラリを追加</button>
+    </div>
+    <div id="libraryFiles">${libraryInputRowsHtml(libraryFiles)}</div>
+    <p class="hint">今回の実行にだけ使用します。settings.json の既定値は初期値として表示されます。</p>
+  </fieldset>
+
+  <fieldset>
     <legend>Output</legend>
     <div class="row"><label class="field" for="outputFormat">Format</label><select id="outputFormat">${formatOptions}</select></div>
     <div class="chk" style="margin-top:6px"><input type="checkbox" id="deleteIntermediates"${
@@ -916,6 +1322,46 @@ function getSimSetupHtml(
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
+  let nextLibraryId = document.querySelectorAll('.library-row').length;
+  function bindLibraryRow(row) {
+    row.querySelector('.remove-library').addEventListener('click', () => row.remove());
+    row.querySelector('.browse-library').addEventListener('click', () => {
+      vscode.postMessage({ command: 'browseLibrary', id: row.dataset.libraryId });
+    });
+  }
+  function addLibraryRow(value = '') {
+    const row = document.createElement('div');
+    row.className = 'library-row';
+    row.dataset.libraryId = String(nextLibraryId++);
+    const input = document.createElement('input');
+    input.className = 'library-file';
+    input.type = 'text';
+    input.value = value;
+    input.setAttribute('aria-label', 'Library package.mo path');
+    const browse = document.createElement('button');
+    browse.className = 'secondary browse-library';
+    browse.type = 'button';
+    browse.title = 'トップ package.mo を選択';
+    browse.setAttribute('aria-label', 'トップ package.mo を選択');
+    browse.innerHTML = '${FOLDER_BUTTON_ICON}';
+    const remove = document.createElement('button');
+    remove.className = 'secondary remove-library';
+    remove.type = 'button';
+    remove.textContent = '削除';
+    row.append(input, browse, remove);
+    bindLibraryRow(row);
+    document.getElementById('libraryFiles').append(row);
+  }
+  document.querySelectorAll('.library-row').forEach(bindLibraryRow);
+  document.getElementById('addLibrary').addEventListener('click', () => addLibraryRow());
+  window.addEventListener('message', (event) => {
+    const message = event.data;
+    if (message && message.command === 'setLibrary' && message.id !== undefined) {
+      const row = Array.from(document.querySelectorAll('.library-row')).find((item) => item.dataset.libraryId === String(message.id));
+      const input = row && row.querySelector('.library-file');
+      if (input) input.value = String(message.file || '');
+    }
+  });
   function collect() {
     return {
       startTime: document.getElementById('startTime').value,
@@ -928,6 +1374,7 @@ function getSimSetupHtml(
       outputFormat: document.getElementById('outputFormat').value,
       deleteIntermediates: document.getElementById('deleteIntermediates').checked,
       logging: Array.from(document.querySelectorAll('.log-chk:checked')).map((e) => e.value),
+      libraryFiles: Array.from(document.querySelectorAll('.library-file')).map((e) => e.value.trim()).filter(Boolean),
     };
   }
   document.getElementById('simulate').addEventListener('click', () => {
@@ -1010,7 +1457,8 @@ async function openSimulationSetup(
     vscode.window.showErrorMessage("実行対象のクラス名を特定できません。");
     return;
   }
-  const cfg = getConfig();
+  const libraryFiles = defaultRunLibraries(target.filePath);
+  const cfg = getConfig(target.doc.uri);
   const stateKey = `modelica.simopts.${className}`;
   const saved = extContext.workspaceState.get<Partial<SimOptions>>(stateKey, {});
   const text = target.classText;
@@ -1051,15 +1499,33 @@ async function openSimulationSetup(
     { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
     { enableScripts: true, retainContextWhenHidden: true }
   );
-  panel.webview.html = getSimSetupHtml(panel.webview, className, initial);
+  panel.webview.html = getSimSetupHtml(
+    panel.webview,
+    className,
+    initial,
+    libraryFiles
+  );
   panel.webview.onDidReceiveMessage(
-    async (msg: { command?: string; values?: unknown } | undefined) => {
+    async (msg: { command?: string; values?: unknown; id?: unknown } | undefined) => {
       if (!msg) return;
       if (msg.command === "simulate") {
+        const rawLibraries =
+          msg.values && typeof msg.values === "object"
+            ? (msg.values as { libraryFiles?: unknown }).libraryFiles
+            : undefined;
+        const selectedLibraries = resolveRunLibraries(
+          rawLibraries ?? [],
+          target.filePath
+        );
+        if (!selectedLibraries) return;
         const opts = sanitizeOptions(msg.values);
         await extContext.workspaceState.update(stateKey, opts);
         panel.dispose();
-        runSimulation(target, opts);
+        runSimulation(target, opts, selectedLibraries);
+      } else if (msg.command === "browseLibrary" && msg.id !== undefined) {
+        const file = await selectLibraryPackageFromExplorer();
+        if (file)
+          panel.webview.postMessage({ command: "setLibrary", id: msg.id, file });
       } else if (msg.command === "saveToModel") {
         const opts = sanitizeOptions(msg.values);
         await extContext.workspaceState.update(stateKey, opts);
@@ -2072,10 +2538,14 @@ export function activate(context: vscodeTypes.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("modelica.check", (arg?: unknown) =>
-      documentForCommand(arg).then((doc) => runCheck(doc || undefined))
+      openCheckWithLibrarySelection(arg)
     ),
     vscode.commands.registerCommand("modelica.simulate", (arg?: unknown) =>
       openSimulationSetup(arg)
+    ),
+    vscode.commands.registerCommand(
+      "modelica.selectDefaultLibraryFiles",
+      selectDefaultLibraryFiles
     )
   );
 

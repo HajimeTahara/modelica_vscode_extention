@@ -7,7 +7,7 @@
       ],
       
       "allow": [
-        "Edit(/modelica/EAST/Icons/**)",
+        "Edit(/modelica/Helion/Icons/**)",
         "Bash(git *)",
         "Bash(npm *)",
         "Bash(node *)",

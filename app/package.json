@@ -28,7 +28,7 @@
     "modelica",
     "mo",
     "OpenModelica",
-    "EAST"
+    "Helion"
   ],
   "main": "./out/src/extension.js",
   "activationEvents": [],
@@ -108,6 +108,15 @@
           "default": ".modelica-build",
           "description": "checkModel / simulate の作業ディレクトリ。相対パスは対象ファイルが属するワークスペースフォルダから解決する。"
         },
+        "modelica.libraryFiles": {
+          "type": "array",
+          "scope": "resource",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "checkModel / simulate で既定として読み込む Modelica ライブラリのトップ package.mo。順序どおり loadFile する。実行時に選択を変更できる。"
+        },
         "modelica.simulation.startTime": {
           "type": "number",
           "default": 0.0,
@@ -186,6 +195,12 @@
         "icon": "$(play)"
       },
       {
+        "command": "modelica.selectDefaultLibraryFiles",
+        "title": "既定ライブラリをエクスプローラーから選択",
+        "category": "Modelica",
+        "icon": "$(folder-opened)"
+      },
+      {
         "command": "modelica.showDocumentation",
         "title": "Documentation を表示",
         "category": "Modelica",
@@ -245,6 +260,11 @@
         "id": "modelica.newSubmenu",
         "label": "Modelica 新規作成",
         "icon": "$(add)"
+      },
+      {
+        "id": "modelica.editorSubmenu",
+        "label": "Modelica",
+        "icon": "$(symbol-class)"
       }
     ],
     "menus": {
@@ -278,6 +298,32 @@
           "group": "2_package@1"
         }
       ],
+      "modelica.editorSubmenu": [
+        {
+          "command": "modelica.check",
+          "group": "1_run@1"
+        },
+        {
+          "command": "modelica.simulate",
+          "group": "1_run@2"
+        },
+        {
+          "command": "modelica.showDiagram",
+          "group": "2_view@1"
+        },
+        {
+          "command": "modelica.showIcon",
+          "group": "2_view@2"
+        },
+        {
+          "command": "modelica.showDocumentation",
+          "group": "2_view@3"
+        },
+        {
+          "command": "modelica.toggleAnnotations",
+          "group": "3_edit@1"
+        }
+      ],
       "editor/context": [
         {
           "command": "modelica.check",
@@ -292,34 +338,9 @@
       ],
       "editor/title": [
         {
-          "command": "modelica.check",
+          "submenu": "modelica.editorSubmenu",
           "when": "resourceLangId == modelica",
           "group": "navigation@1"
-        },
-        {
-          "command": "modelica.simulate",
-          "when": "resourceLangId == modelica",
-          "group": "navigation@2"
-        },
-        {
-          "command": "modelica.showDiagram",
-          "when": "resourceLangId == modelica",
-          "group": "navigation@3"
-        },
-        {
-          "command": "modelica.showIcon",
-          "when": "resourceLangId == modelica",
-          "group": "navigation@4"
-        },
-        {
-          "command": "modelica.showDocumentation",
-          "when": "resourceLangId == modelica",
-          "group": "navigation@5"
-        },
-        {
-          "command": "modelica.toggleAnnotations",
-          "when": "resourceLangId == modelica",
-          "group": "navigation@6"
         }
       ],
       "view/title": [

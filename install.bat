@@ -19,7 +19,7 @@ REM ============================================================
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "SRC=%ROOT%\app"
-set "EXT_ID=east.modelica-vscode"
+set "EXT_ID=helion.modelica-vscode"
 set "VSIXDIR=%ROOT%\.vsix-build"
 set "TEMP_LICENSE=%SRC%\LICENSE"
 

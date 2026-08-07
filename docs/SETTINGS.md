@@ -9,6 +9,7 @@
 | `modelica.omcPath` | string | 空文字 | OpenModelica コンパイラ `omc` の実行ファイルパス。空の場合、または指定パスが見つからない場合は OS の `PATH` から `omc` を探す。 |
 | `modelica.checkOnSave` | boolean | `false` | `.mo` ファイル保存時に `checkModel` を自動実行するかどうか。 |
 | `modelica.buildDirectory` | string | `.modelica-build` | `checkModel` と `simulate` の作業ディレクトリ。相対パスは対象ファイルが属するワークスペースフォルダから解決する。 |
+| `modelica.libraryFiles` | string[] | `[]` | `checkModel` と `simulate` で既定として読み込むライブラリのトップ `package.mo`。配列の順序で `loadFile` する。 |
 | `modelica.simulation.startTime` | number | `0.0` | Simulation Setup ダイアログの Start Time 初期値。モデル内の `annotation(experiment(...))` や前回設定が無い場合に使う。 |
 | `modelica.simulation.stopTime` | number | `1.0` | Simulation Setup ダイアログの Stop Time 初期値。モデル内の `annotation(experiment(...))` や前回設定が無い場合に使う。 |
 | `modelica.simulation.interval` | number | `0.1` | Simulation Setup ダイアログの Interval 初期値。モデル内の `annotation(experiment(Interval=...))` や前回設定が無い場合に使う。 |
@@ -34,6 +35,10 @@
   "modelica.omcPath": "C:\\OpenModelica1.26.1-64bit\\bin\\omc.exe",
   "modelica.checkOnSave": true,
   "modelica.buildDirectory": ".modelica-build",
+  "modelica.libraryFiles": [
+    "${workspaceFolder}/../ModelicaStandardLibrary/Modelica/package.mo",
+    "${workspaceFolder}/../Helion/package.mo"
+  ],
   "modelica.simulation.startTime": 0,
   "modelica.simulation.stopTime": 10,
   "modelica.simulation.interval": 0.1,
@@ -47,3 +52,14 @@
 
 `modelica.omcPath` は空でもよい。空の場合は OS の `PATH` から `omc` を探す。
 値を指定した場合はそのパスを先に試し、見つからなければ最後に OS の `PATH` から `omc` を探す。
+
+`modelica.libraryFiles` はワークスペース設定に置くことを推奨する。手動で「モデルをチェック」または
+「シミュレーション実行」を選ぶと Setup 画面が開き、ここに指定した有効な項目がライブラリ入力欄の
+初期値として表示される。その実行だけ追加・除外できる。「ライブラリを追加」で行を作り、各行の
+フォルダボタンからエクスプローラーでトップ `package.mo` を選ぶ。入力した内容は設定へ保存されない。
+保存時の自動チェックでは、この既定リストをそのまま使う。
+
+VS Code 標準の Settings UI にある配列の入力欄へ、拡張機能からファイル選択ボタンは追加できない。
+既定値をエクスプローラーから設定するには、コマンドパレットで
+**「Modelica: 既定ライブラリをエクスプローラーから選択」**を実行する。選んだトップ `package.mo` は、
+アクティブなワークスペース（複数なら選択したワークスペース）の `modelica.libraryFiles` に保存される。

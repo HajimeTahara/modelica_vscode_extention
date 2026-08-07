@@ -115,13 +115,33 @@ export function parseResultFile(stdout: string | undefined): string | null {
   return m && m[1] ? m[1] : null;
 }
 
+/** 対象モデルより先に読み込むライブラリの loadFile 行を作る。 */
+function buildLibraryLoadLines(
+  libraryFiles: string[] | undefined,
+  loadTarget: string
+): string[] {
+  // loadTarget 自身を選んでも二重に loadFile しない。
+  const seen = new Set<string>([toOmcPath(loadTarget)]);
+  const lines: string[] = [];
+  for (const file of libraryFiles || []) {
+    const normalized = toOmcPath(file);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    lines.push(`loadFile("${normalized}"); getErrorString();`);
+  }
+  return lines;
+}
+
 export function buildCheckScript(args: {
   loadTarget: string;
   className: string;
+  /** 対象モデルより先に loadFile するライブラリ。 */
+  libraryFiles?: string[];
 }): string {
-  const { loadTarget, className } = args;
+  const { loadTarget, className, libraryFiles } = args;
   return [
     "loadModel(Modelica); getErrorString();",
+    ...buildLibraryLoadLines(libraryFiles, loadTarget),
     `loadFile("${toOmcPath(loadTarget)}"); getErrorString();`,
     `checkModel(${className});`,
     "getErrorString();",
@@ -133,8 +153,10 @@ export function buildSimulateScript(args: {
   loadTarget: string;
   className: string;
   options?: SimulateOptions;
+  /** 対象モデルより先に loadFile するライブラリ。 */
+  libraryFiles?: string[];
 }): string {
-  const { loadTarget, className } = args;
+  const { loadTarget, className, libraryFiles } = args;
   const o: SimulateOptions = args.options || {};
   const parts: string[] = [];
   if (o.startTime !== undefined) parts.push(`startTime=${o.startTime}`);
@@ -157,6 +179,7 @@ export function buildSimulateScript(args: {
   const optStr = parts.length ? `, ${parts.join(", ")}` : "";
   return [
     "loadModel(Modelica); getErrorString();",
+    ...buildLibraryLoadLines(libraryFiles, loadTarget),
     `loadFile("${toOmcPath(loadTarget)}"); getErrorString();`,
     `simulate(${className}${optStr});`,
     "getErrorString();",

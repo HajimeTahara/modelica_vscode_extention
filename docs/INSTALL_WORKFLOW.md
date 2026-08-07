@@ -2,7 +2,7 @@
 
 `install.bat` は、`app/` を VS Code 拡張機能として VSIX 化し、必要に応じてその VSIX をローカル VS Code にインストールするためのスクリプト。
 
-配布実体は `.vsix-build/east.modelica-vscode-<version>.vsix`。`.modelica-build/` は Modelica のコンパイル/シミュレーション成果物用に使う。
+配布実体は `.vsix-build/helion.modelica-vscode-<version>.vsix`。`.modelica-build/` は Modelica のコンパイル/シミュレーション成果物用に使う。
 
 ## Commands
 
@@ -25,7 +25,7 @@ flowchart TD
 
     E -- "--install / 1" --> I["INSTALL_AFTER_PACKAGE=1"]
     E -- "--package / 2" --> P["INSTALL_AFTER_PACKAGE を空にする"]
-    E -- "--uninstall / 3" --> U["code --uninstall-extension east.modelica-vscode"]
+    E -- "--uninstall / 3" --> U["code --uninstall-extension helion.modelica-vscode"]
     E -- "Q" --> Q["quit"]
     E -- "不明な引数" --> ERR2["usage"]
 
